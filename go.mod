@@ -3,7 +3,7 @@ module github.com/jaredtrent/jellyfin-mcp
 go 1.25
 
 require (
-	github.com/google/jsonschema-go v0.4.2
+	github.com/google/jsonschema-go v0.4.3
 	github.com/modelcontextprotocol/go-sdk v1.4.0
 	github.com/spf13/cobra v1.10.2
 )
