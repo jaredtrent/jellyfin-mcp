@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # ---------- build stage ----------
-FROM golang:1.26.4-alpine AS build
+FROM golang:1.26.5-alpine AS build
 
 # Never silently fetch a different toolchain than the image ships (reproducibility).
 ENV GOTOOLCHAIN=local
