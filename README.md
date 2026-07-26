@@ -287,9 +287,10 @@ Image tags: `latest` (latest build from `main`), the full version from release t
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `JELLYFIN_API_KEY` | Yes | API key from your Jellyfin dashboard |
-| `JELLYFIN_URL` | No | Server URL — e.g. `http://YOUR_SERVER:8096`, or `https://YOUR_SERVER:8920` if HTTPS is enabled. Defaults to a placeholder, so set this. |
-| `JELLYFIN_USER_ID` | No | User ID — auto-detected from the API key if not set |
+| `JELLYFIN_API_KEY` | Yes | Clé API créée depuis le tableau de bord Jellyfin |
+| `JELLYFIN_URL` | Yes | URL HTTP(S) du serveur, par exemple `http://YOUR_SERVER:8096` ou `https://YOUR_SERVER:8920`. L'hôte d'exemple `jellyfin_host` est refusé au démarrage. |
+| `JELLYFIN_USER_ID` | No | ID utilisateur — détecté automatiquement depuis la clé API s'il est absent |
+| `JELLYFIN_REQUIRE_USER_ID` | No | Avec `true` ou `1`, exige `JELLYFIN_USER_ID` et interdit toute sélection automatique d'un compte administrateur |
 
 ### Toolsets
 
@@ -341,6 +342,8 @@ Beyond tools, jellyfin-mcp implements several MCP protocol features that compati
 ## Important notes
 
 **API key permissions** — The API key grants full access to whatever Jellyfin permissions are available. For shared or less trusted setups, pair it with `--read-only` or `--toolsets` to limit what the AI can do.
+
+`--read-only` limite la surface des outils, mais n'active pas le mode strict de sélection utilisateur. Pour interdire tout fallback vers un compte administrateur, configurez explicitement `JELLYFIN_USER_ID` et `JELLYFIN_REQUIRE_USER_ID=true`.
 
 **Network exposure** — In stdio mode, the server is only accessible to the local MCP client process. In HTTP mode, use `--http-token` whenever the server is reachable beyond localhost. The server refuses to start on a non-localhost address without a token.
 

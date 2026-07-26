@@ -9,40 +9,48 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"os"
+	"strings"
 	"sync"
 	"time"
 )
 
 type JellyfinClient struct {
-	baseURL    string
-	apiKey     string
-	httpClient *http.Client
-	userID     string
-	mu         sync.Mutex
+	baseURL       string
+	apiKey        string
+	httpClient    *http.Client
+	userID        string
+	requireUserID bool
+	mu            sync.Mutex
 }
 
 func (c *JellyfinClient) BaseURL() string { return c.baseURL }
 func (c *JellyfinClient) APIKey() string  { return c.apiKey }
 
-// NewJellyfinClient creates a client from environment variables.
-// Exits if JELLYFIN_API_KEY is not set.
+// NewJellyfinClient crée un client depuis les variables d'environnement.
 func NewJellyfinClient() *JellyfinClient {
-	baseURL := os.Getenv("JELLYFIN_URL")
-	if baseURL == "" {
-		baseURL = "https://jellyfin_host:8920"
+	cfg, err := LoadClientConfigFromEnv()
+	if err != nil {
+		log.Fatalf("%v", err)
 	}
-	apiKey := os.Getenv("JELLYFIN_API_KEY")
-	if apiKey == "" {
-		log.Fatalf("JELLYFIN_API_KEY environment variable must be set")
+	client, err := NewClient(cfg)
+	if err != nil {
+		log.Fatalf("%v", err)
 	}
-	userID := os.Getenv("JELLYFIN_USER_ID")
+	return client
+}
+
+// NewClient construit un client depuis une configuration explicite.
+func NewClient(cfg ClientConfig) (*JellyfinClient, error) {
+	if err := ValidateClientConfig(cfg); err != nil {
+		return nil, err
+	}
 	return &JellyfinClient{
-		baseURL:    baseURL,
-		apiKey:     apiKey,
-		httpClient: &http.Client{Timeout: 30 * time.Second},
-		userID:     userID,
-	}
+		baseURL:       normalizeBaseURL(cfg.BaseURL),
+		apiKey:        cfg.APIKey,
+		httpClient:    &http.Client{Timeout: 30 * time.Second},
+		userID:        strings.TrimSpace(cfg.UserID),
+		requireUserID: cfg.RequireUserID,
+	}, nil
 }
 
 func (c *JellyfinClient) DoRequest(ctx context.Context, method, endpoint string, params url.Values, body any) ([]byte, error) {
@@ -217,6 +225,9 @@ func (c *JellyfinClient) GetUserID(ctx context.Context) (string, error) {
 	defer c.mu.Unlock()
 	if c.userID != "" {
 		return c.userID, nil
+	}
+	if c.requireUserID {
+		return "", fmt.Errorf("user ID not set: set JELLYFIN_USER_ID because JELLYFIN_REQUIRE_USER_ID is enabled")
 	}
 
 	// Try /Users/Me first -- works when the API token is a user auth token

@@ -77,9 +77,10 @@ Any client that supports the `mcpServers` JSON format (Cursor, VS Code Copilot, 
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `JELLYFIN_API_KEY` | Yes | — | API key from your Jellyfin dashboard |
-| `JELLYFIN_URL` | No | — | Server URL, e.g. `http://YOUR_SERVER:8096` (or `https://YOUR_SERVER:8920` if HTTPS is enabled) |
-| `JELLYFIN_USER_ID` | No | auto-detected | User ID for user-scoped operations |
+| `JELLYFIN_API_KEY` | Yes | — | Clé API créée depuis le tableau de bord Jellyfin |
+| `JELLYFIN_URL` | Yes | — | URL HTTP(S) du serveur. L'hôte d'exemple `jellyfin_host` est refusé au démarrage. |
+| `JELLYFIN_USER_ID` | No | auto-detected | ID utilisateur pour les opérations liées à un compte |
+| `JELLYFIN_REQUIRE_USER_ID` | No | `false` | Avec `true` ou `1`, exige `JELLYFIN_USER_ID` et interdit tout fallback administrateur. `--read-only` n'active pas ce mode. |
 
 ## CLI flags
 
