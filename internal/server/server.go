@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"crypto/subtle"
 	"fmt"
 	"log"
 	"log/slog"
@@ -153,8 +152,8 @@ func runHTTP(server *mcp.Server, addr, token string) {
 		}
 	}()
 
-	if token == "" && !strings.HasPrefix(addr, "127.0.0.1") && !strings.HasPrefix(addr, "localhost") {
-		log.Fatalf("FATAL: --http-token is required when listening on non-localhost address %s", addr)
+	if err := validateHTTPAuth(addr, token); err != nil {
+		log.Fatalf("FATAL: %v", err)
 	}
 	if token == "" {
 		log.Printf("WARNING: HTTP mode without --http-token — MCP endpoint has no authentication (localhost only)")
@@ -165,23 +164,6 @@ func runHTTP(server *mcp.Server, addr, token string) {
 		log.Fatalf("server error: %v", err)
 	}
 	stop()
-}
-
-// bearerAuth wraps an http.Handler with bearer token authentication.
-// If token is empty, the handler is returned unwrapped (no auth).
-func bearerAuth(next http.Handler, token string) http.Handler {
-	if token == "" {
-		return next
-	}
-	expected := []byte("Bearer " + token)
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		actual := []byte(r.Header.Get("Authorization"))
-		if subtle.ConstantTimeCompare(actual, expected) != 1 {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
 }
 
 // completionHandler provides auto-completion for prompt arguments and resource template URIs.
