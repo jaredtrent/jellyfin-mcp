@@ -5,8 +5,10 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -82,5 +84,145 @@ func TestGetUserIDPreservesAdminFallbackByDefault(t *testing.T) {
 	}
 	if requests.Load() != 2 {
 		t.Fatalf("requêtes = %d, attendu 2", requests.Load())
+	}
+}
+
+type generatedBody struct {
+	remaining int64
+	read      int64
+}
+
+func (body *generatedBody) Read(dst []byte) (int, error) {
+	if body.remaining == 0 {
+		return 0, io.EOF
+	}
+	size := int64(len(dst))
+	if size > body.remaining {
+		size = body.remaining
+	}
+	for i := int64(0); i < size; i++ {
+		dst[i] = 'x'
+	}
+	body.remaining -= size
+	body.read += size
+	return int(size), nil
+}
+
+func (*generatedBody) Close() error {
+	return nil
+}
+
+func TestPostRawBoundsErrorResponse(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		size int64
+	}{
+		{name: "à la limite", size: MaxResponseBodyBytes},
+		{name: "au-delà de la limite", size: MaxResponseBodyBytes + 1024},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := &generatedBody{remaining: tt.size}
+			client, err := NewClient(ClientConfig{
+				BaseURL: "http://jellyfin.local",
+				APIKey:  "secret",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			client.httpClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusBadGateway,
+					Header:     make(http.Header),
+					Body:       body,
+				}, nil
+			})}
+
+			err = client.PostRaw(context.Background(), "/Images/item", nil, []byte("image"), "image/jpeg")
+			if err == nil || !strings.Contains(err.Error(), "502") {
+				t.Fatalf("erreur inattendue: %v", err)
+			}
+			wantRead := tt.size
+			if wantRead > MaxResponseBodyBytes {
+				wantRead = MaxResponseBodyBytes
+			}
+			if body.read != wantRead {
+				t.Fatalf("octets lus = %d, attendu %d", body.read, wantRead)
+			}
+			if len(err.Error()) > ErrorBodyMaxLen+64 {
+				t.Fatalf("message d'erreur non borné: %d octets", len(err.Error()))
+			}
+		})
+	}
+}
+
+func TestGetUserIDDoesNotLockDuringRequest(t *testing.T) {
+	t.Parallel()
+
+	requestStarted := make(chan struct{})
+	releaseRequest := make(chan struct{})
+	var startOnce sync.Once
+	var requests atomic.Int64
+
+	client, err := NewClient(ClientConfig{
+		BaseURL: "http://jellyfin.local",
+		APIKey:  "secret",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path != "/Users/Me" {
+			t.Fatalf("requête inattendue: %s", req.URL.Path)
+		}
+		requests.Add(1)
+		startOnce.Do(func() { close(requestStarted) })
+		<-releaseRequest
+		return jsonResponse(http.StatusOK, `{"Id":"user-1"}`), nil
+	})}
+
+	const callers = 8
+	results := make(chan string, callers)
+	errors := make(chan error, callers)
+	for range callers {
+		go func() {
+			userID, err := client.GetUserID(context.Background())
+			results <- userID
+			errors <- err
+		}()
+	}
+
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		t.Fatal("la requête de résolution n'a pas démarré")
+	}
+
+	mutexAvailable := make(chan struct{})
+	go func() {
+		client.mu.Lock()
+		client.mu.Unlock()
+		close(mutexAvailable)
+	}()
+	select {
+	case <-mutexAvailable:
+	case <-time.After(time.Second):
+		t.Fatal("le mutex est conservé pendant la requête HTTP")
+	}
+
+	close(releaseRequest)
+	for range callers {
+		if err := <-errors; err != nil {
+			t.Fatal(err)
+		}
+		if userID := <-results; userID != "user-1" {
+			t.Fatalf("GetUserID() = %q", userID)
+		}
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("résolutions réseau = %d, attendu 1", requests.Load())
 	}
 }

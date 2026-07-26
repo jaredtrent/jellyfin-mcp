@@ -21,6 +21,7 @@ type JellyfinClient struct {
 	userID        string
 	requireUserID bool
 	mu            sync.Mutex
+	userIDReady   chan struct{}
 }
 
 func (c *JellyfinClient) BaseURL() string { return c.baseURL }
@@ -159,7 +160,7 @@ func (c *JellyfinClient) PostRaw(ctx context.Context, endpoint string, params ur
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, MaxResponseBodyBytes))
 		return fmt.Errorf("API error %d: %s", resp.StatusCode, Truncate(string(respBody), ErrorBodyMaxLen))
 	}
 
@@ -217,26 +218,59 @@ func FetchAllPages(ctx context.Context, client Client, endpoint string, params u
 	return allItems, totalRecords, nil
 }
 
-// GetUserID returns the cached user ID, fetching on first call.
-// Resolution order: JELLYFIN_USER_ID env var -> /Users/Me (token-authenticated
-// user) -> first admin user from /Users.
+// GetUserID renvoie l'identifiant mis en cache ou le résout une seule fois.
 func (c *JellyfinClient) GetUserID(ctx context.Context) (string, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.userID != "" {
-		return c.userID, nil
-	}
-	if c.requireUserID {
-		return "", fmt.Errorf("user ID not set: set JELLYFIN_USER_ID because JELLYFIN_REQUIRE_USER_ID is enabled")
-	}
+	for {
+		c.mu.Lock()
+		if c.userID != "" {
+			userID := c.userID
+			c.mu.Unlock()
+			return userID, nil
+		}
+		if c.requireUserID {
+			c.mu.Unlock()
+			return "", fmt.Errorf("user ID not set: set JELLYFIN_USER_ID because JELLYFIN_REQUIRE_USER_ID is enabled")
+		}
+		if c.userIDReady != nil {
+			ready := c.userIDReady
+			c.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return "", fmt.Errorf("waiting for user ID resolution: %w", ctx.Err())
+			case <-ready:
+				continue
+			}
+		}
 
+		ready := make(chan struct{})
+		c.userIDReady = ready
+		c.mu.Unlock()
+
+		userID, err := c.resolveUserID(ctx)
+
+		c.mu.Lock()
+		if err == nil && c.userID == "" {
+			c.userID = userID
+		}
+		if c.userID != "" {
+			userID = c.userID
+			err = nil
+		}
+		close(ready)
+		c.userIDReady = nil
+		c.mu.Unlock()
+
+		return userID, err
+	}
+}
+
+func (c *JellyfinClient) resolveUserID(ctx context.Context) (string, error) {
 	// Try /Users/Me first -- works when the API token is a user auth token
 	// and returns the correct user identity for the current session.
 	var me map[string]any
 	if err := c.Get(ctx, "/Users/Me", nil, &me); err == nil {
 		if id, ok := me["Id"].(string); ok && id != "" {
 			log.Printf("resolved user via /Users/Me: %s", id)
-			c.userID = id
 			return id, nil
 		}
 	}
@@ -263,7 +297,6 @@ func (c *JellyfinClient) GetUserID(ctx context.Context) (string, error) {
 		if policy, ok := u["Policy"].(map[string]any); ok {
 			if isAdmin, ok := policy["IsAdministrator"].(bool); ok && isAdmin {
 				log.Printf("auto-detected admin user ID: %s (set JELLYFIN_USER_ID to override)", id)
-				c.userID = id
 				return id, nil
 			}
 		}
@@ -273,6 +306,5 @@ func (c *JellyfinClient) GetUserID(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("no valid user ID found on Jellyfin server")
 	}
 	log.Printf("WARNING: no admin user found, using first user ID: %s (set JELLYFIN_USER_ID to override)", fallbackID)
-	c.userID = fallbackID
 	return fallbackID, nil
 }
