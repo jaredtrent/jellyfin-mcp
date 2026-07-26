@@ -345,6 +345,8 @@ Beyond tools, jellyfin-mcp implements several MCP protocol features that compati
 
 `--read-only` limite la surface des outils, mais n'active pas le mode strict de sélection utilisateur. Pour interdire tout fallback vers un compte administrateur, configurez explicitement `JELLYFIN_USER_ID` et `JELLYFIN_REQUIRE_USER_ID=true`.
 
+Avec `--read-only`, ou lorsque `--toolsets` n'inclut pas `admin`, les ressources `jellyfin://users` et `jellyfin://users/{userId}` ne sont pas exposées et la complétion des ID utilisateur n'interroge pas `/Users`.
+
 **Network exposure** — In stdio mode, the server is only accessible to the local MCP client process. In HTTP mode, use `--http-token` whenever the server is reachable beyond localhost. The server refuses to start on a non-localhost address without a token.
 
 **Jellyfin version** — Tested against Jellyfin 10.8 through 10.11. Older versions may be missing some API endpoints (e.g., playback reporting, activity log queries).

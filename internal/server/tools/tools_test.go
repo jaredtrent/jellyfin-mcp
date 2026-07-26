@@ -72,6 +72,52 @@ func TestBuildToolFilter_DisableDestructive(t *testing.T) {
 	}
 }
 
+func TestDisableDestructiveRemovesDestructiveTools(t *testing.T) {
+	mc := &mockClient{}
+	srv := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "0.1"}, nil)
+	tools.RegisterTools(srv, mc, tools.BuildToolFilter("", false, true))
+
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+	if _, err := srv.Connect(t.Context(), serverTransport, nil); err != nil {
+		t.Fatal(err)
+	}
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0.1"}, nil)
+	session, err := client.Connect(t.Context(), clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+
+	list, err := session.ListTools(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered := make(map[string]bool, len(list.Tools))
+	for _, tool := range list.Tools {
+		registered[tool.Name] = true
+	}
+
+	destructiveTools := []string{
+		"jellyfin_system_control",
+		"jellyfin_users",
+		"jellyfin_library_manage",
+		"jellyfin_devices",
+		"jellyfin_recordings",
+		"jellyfin_videos",
+	}
+	for _, toolName := range destructiveTools {
+		if registered[toolName] {
+			t.Errorf("%s reste enregistré avec --disable-destructive", toolName)
+		}
+		if _, err := session.CallTool(t.Context(), &mcp.CallToolParams{
+			Name:      toolName,
+			Arguments: map[string]any{"confirm": true},
+		}); err == nil {
+			t.Errorf("%s reste appelable avec --disable-destructive", toolName)
+		}
+	}
+}
+
 func TestBuildToolFilter_NilAnnotations(t *testing.T) {
 	enabled := tools.BuildToolFilter("", false, false)
 	// Tools with nil annotations should be enabled when no filter is active

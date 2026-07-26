@@ -93,7 +93,7 @@ Append flags after the package name in the `args` array:
 | Flag | Description |
 |------|-------------|
 | `--toolsets` | Comma-separated groups: `discovery`, `media`, `user`, `playback`, `admin`, `content`, `analytics`, `livetv` |
-| `--read-only` | Only register read-only tools |
+| `--read-only` | Enregistre uniquement les outils en lecture seule et masque les ressources/complétions utilisateur orientées administration |
 | `--disable-destructive` | Skip destructive tools (delete, restart, shutdown) |
 
 ## Tools (31)

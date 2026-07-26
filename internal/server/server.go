@@ -43,6 +43,7 @@ func ToolsetNames() map[string][]string {
 // Run initialises the MCP server and starts the selected transport.
 func Run(cfg Config) {
 	client := jf.NewJellyfinClient()
+	includeAdminResources := resources.AdminResourcesEnabled(cfg.ReadOnly, cfg.Toolsets)
 
 	tracker := &subscriptionTracker{}
 	srv := mcp.NewServer(&mcp.Implementation{
@@ -51,7 +52,7 @@ func Run(cfg Config) {
 		Version: version,
 	}, &mcp.ServerOptions{
 		Instructions:       serverInstructions(),
-		CompletionHandler:  completionHandler(client),
+		CompletionHandler:  completionHandler(client, includeAdminResources),
 		SubscribeHandler:   subscribeHandler(tracker),
 		UnsubscribeHandler: unsubscribeHandler(tracker),
 	})
@@ -63,7 +64,7 @@ func Run(cfg Config) {
 	enabled := tools.BuildToolFilter(cfg.Toolsets, cfg.ReadOnly, cfg.DisableDestructive)
 
 	// Register all components
-	resources.RegisterResources(srv, client)
+	resources.RegisterResources(srv, client, includeAdminResources)
 	prompts.RegisterPrompts(srv, client)
 	tools.RegisterTools(srv, client, enabled)
 
@@ -184,7 +185,7 @@ func bearerAuth(next http.Handler, token string) http.Handler {
 }
 
 // completionHandler provides auto-completion for prompt arguments and resource template URIs.
-func completionHandler(client jf.Client) func(context.Context, *mcp.CompleteRequest) (*mcp.CompleteResult, error) {
+func completionHandler(client jf.Client, includeAdmin bool) func(context.Context, *mcp.CompleteRequest) (*mcp.CompleteResult, error) {
 	// Prompt argument completions
 	promptCompletions := map[string]map[string][]string{
 		"find-and-play": {
@@ -272,6 +273,9 @@ func completionHandler(client jf.Client) func(context.Context, *mcp.CompleteRequ
 					}
 				}
 			case strings.HasPrefix(uri, "jellyfin://users/"):
+				if !includeAdmin {
+					break
+				}
 				partial := strings.ToLower(req.Params.Argument.Value)
 				var users []map[string]any
 				if err := client.Get(ctx, "/Users", nil, &users); err == nil {
