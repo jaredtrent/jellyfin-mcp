@@ -59,17 +59,17 @@ func TestAdminResourcesEnabled(t *testing.T) {
 		toolsets string
 		want     bool
 	}{
-		{name: "surface complète", want: true},
-		{name: "lecture seule", readOnly: true},
-		{name: "sans admin", toolsets: "discovery,media"},
-		{name: "admin explicite", toolsets: "discovery, admin", want: true},
-		{name: "lecture seule prioritaire", readOnly: true, toolsets: "admin"},
+		{name: "full surface", want: true},
+		{name: "read only", readOnly: true},
+		{name: "without admin", toolsets: "discovery,media"},
+		{name: "explicit admin", toolsets: "discovery, admin", want: true},
+		{name: "read only takes precedence", readOnly: true, toolsets: "admin"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			if got := AdminResourcesEnabled(tt.readOnly, tt.toolsets); got != tt.want {
-				t.Fatalf("AdminResourcesEnabled() = %v, attendu %v", got, tt.want)
+				t.Fatalf("AdminResourcesEnabled() = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -79,7 +79,7 @@ func TestRegisterResourcesScopesAdminResources(t *testing.T) {
 	t.Parallel()
 
 	for _, includeAdmin := range []bool{false, true} {
-		t.Run(map[bool]string{false: "masquées", true: "exposées"}[includeAdmin], func(t *testing.T) {
+		t.Run(map[bool]string{false: "hidden", true: "exposed"}[includeAdmin], func(t *testing.T) {
 			server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "1"}, nil)
 			RegisterResources(server, &stubClient{}, includeAdmin)
 
@@ -117,7 +117,7 @@ func TestRegisterResourcesScopesAdminResources(t *testing.T) {
 			}
 			if hasUsersResource != includeAdmin || hasUsersTemplate != includeAdmin {
 				t.Fatalf(
-					"surface admin inattendue: resource=%v template=%v includeAdmin=%v",
+					"unexpected admin surface: resource=%v template=%v includeAdmin=%v",
 					hasUsersResource,
 					hasUsersTemplate,
 					includeAdmin,

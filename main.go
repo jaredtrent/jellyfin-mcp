@@ -45,10 +45,10 @@ func usageTemplate() string {
   {{.UseLine}}{{end}}
 
 Environment variables:
-  JELLYFIN_URL              URL HTTP(S) du serveur (obligatoire)
-  JELLYFIN_API_KEY          Clé API (obligatoire)
-  JELLYFIN_USER_ID          ID utilisateur (optionnel, détecté automatiquement sinon)
-  JELLYFIN_REQUIRE_USER_ID  Exige JELLYFIN_USER_ID et interdit le fallback administrateur
+  JELLYFIN_URL              Jellyfin server HTTP(S) URL (required)
+  JELLYFIN_API_KEY          API key (required)
+  JELLYFIN_USER_ID          User ID (optional, auto-detected when omitted)
+  JELLYFIN_REQUIRE_USER_ID  Require JELLYFIN_USER_ID and disable admin fallback
 
 Flags:
 {{.LocalFlags.FlagUsages | trimTrailingWhitespaces}}

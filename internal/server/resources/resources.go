@@ -11,7 +11,7 @@ import (
 	jf "github.com/jaredtrent/jellyfin-mcp/internal/jellyfin"
 )
 
-// AdminResourcesEnabled applique aux ressources la même surface que les outils admin.
+// AdminResourcesEnabled applies the admin tool surface to resources.
 func AdminResourcesEnabled(readOnly bool, toolsets string) bool {
 	if readOnly {
 		return false

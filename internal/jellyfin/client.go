@@ -27,7 +27,7 @@ type JellyfinClient struct {
 func (c *JellyfinClient) BaseURL() string { return c.baseURL }
 func (c *JellyfinClient) APIKey() string  { return c.apiKey }
 
-// NewJellyfinClient crée un client depuis les variables d'environnement.
+// NewJellyfinClient creates a client from environment variables.
 func NewJellyfinClient() *JellyfinClient {
 	cfg, err := LoadClientConfigFromEnv()
 	if err != nil {
@@ -40,7 +40,7 @@ func NewJellyfinClient() *JellyfinClient {
 	return client
 }
 
-// NewClient construit un client depuis une configuration explicite.
+// NewClient constructs a client from explicit configuration.
 func NewClient(cfg ClientConfig) (*JellyfinClient, error) {
 	if err := ValidateClientConfig(cfg); err != nil {
 		return nil, err
@@ -218,7 +218,7 @@ func FetchAllPages(ctx context.Context, client Client, endpoint string, params u
 	return allItems, totalRecords, nil
 }
 
-// GetUserID renvoie l'identifiant mis en cache ou le résout une seule fois.
+// GetUserID returns the cached user ID or resolves it once.
 func (c *JellyfinClient) GetUserID(ctx context.Context) (string, error) {
 	for {
 		c.mu.Lock()

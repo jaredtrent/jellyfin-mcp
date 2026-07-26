@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-// ClientConfig regroupe la configuration nécessaire au client Jellyfin.
+// ClientConfig contains the settings required by the Jellyfin client.
 type ClientConfig struct {
 	BaseURL       string
 	APIKey        string
@@ -16,7 +16,7 @@ type ClientConfig struct {
 	RequireUserID bool
 }
 
-// LoadClientConfigFromEnv lit la configuration du client depuis l'environnement.
+// LoadClientConfigFromEnv reads client configuration from the environment.
 func LoadClientConfigFromEnv() (ClientConfig, error) {
 	cfg := ClientConfig{
 		BaseURL: strings.TrimSpace(os.Getenv("JELLYFIN_URL")),
@@ -36,7 +36,7 @@ func LoadClientConfigFromEnv() (ClientConfig, error) {
 	return cfg, nil
 }
 
-// ValidateClientConfig vérifie la configuration avant toute requête réseau.
+// ValidateClientConfig validates configuration before any network request.
 func ValidateClientConfig(cfg ClientConfig) error {
 	if strings.TrimSpace(cfg.APIKey) == "" {
 		return fmt.Errorf("JELLYFIN_API_KEY environment variable must be set")
@@ -50,7 +50,7 @@ func ValidateClientConfig(cfg ClientConfig) error {
 	return nil
 }
 
-// ValidateJellyfinURL exige une URL HTTP(S) absolue et rejette l'hôte d'exemple.
+// ValidateJellyfinURL requires an absolute HTTP(S) URL and rejects the placeholder host.
 func ValidateJellyfinURL(raw string) error {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {

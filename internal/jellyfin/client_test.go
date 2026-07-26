@@ -41,10 +41,10 @@ func TestGetUserIDStrictModeNeverFallsBack(t *testing.T) {
 
 	_, err := client.GetUserID(context.Background())
 	if err == nil {
-		t.Fatal("mode strict sans identifiant accepté")
+		t.Fatal("strict mode accepted a missing user ID")
 	}
 	if requests.Load() != 0 {
-		t.Fatalf("%d requête(s) réseau effectuée(s) en mode strict", requests.Load())
+		t.Fatalf("%d network request(s) made in strict mode", requests.Load())
 	}
 }
 
@@ -70,7 +70,7 @@ func TestGetUserIDPreservesAdminFallbackByDefault(t *testing.T) {
 				{"Id":"admin-1","Policy":{"IsAdministrator":true}}
 			]`), nil
 		default:
-			t.Fatalf("requête inattendue: %s", req.URL.Path)
+			t.Fatalf("unexpected request: %s", req.URL.Path)
 			return nil, nil
 		}
 	})}
@@ -83,7 +83,7 @@ func TestGetUserIDPreservesAdminFallbackByDefault(t *testing.T) {
 		t.Fatalf("GetUserID() = %q", userID)
 	}
 	if requests.Load() != 2 {
-		t.Fatalf("requêtes = %d, attendu 2", requests.Load())
+		t.Fatalf("requests = %d, want 2", requests.Load())
 	}
 }
 
@@ -119,8 +119,8 @@ func TestPostRawBoundsErrorResponse(t *testing.T) {
 		name string
 		size int64
 	}{
-		{name: "à la limite", size: MaxResponseBodyBytes},
-		{name: "au-delà de la limite", size: MaxResponseBodyBytes + 1024},
+		{name: "at the limit", size: MaxResponseBodyBytes},
+		{name: "above the limit", size: MaxResponseBodyBytes + 1024},
 	}
 
 	for _, tt := range tests {
@@ -143,17 +143,17 @@ func TestPostRawBoundsErrorResponse(t *testing.T) {
 
 			err = client.PostRaw(context.Background(), "/Images/item", nil, []byte("image"), "image/jpeg")
 			if err == nil || !strings.Contains(err.Error(), "502") {
-				t.Fatalf("erreur inattendue: %v", err)
+				t.Fatalf("unexpected error: %v", err)
 			}
 			wantRead := tt.size
 			if wantRead > MaxResponseBodyBytes {
 				wantRead = MaxResponseBodyBytes
 			}
 			if body.read != wantRead {
-				t.Fatalf("octets lus = %d, attendu %d", body.read, wantRead)
+				t.Fatalf("bytes read = %d, want %d", body.read, wantRead)
 			}
 			if len(err.Error()) > ErrorBodyMaxLen+64 {
-				t.Fatalf("message d'erreur non borné: %d octets", len(err.Error()))
+				t.Fatalf("unbounded error message: %d bytes", len(err.Error()))
 			}
 		})
 	}
@@ -176,7 +176,7 @@ func TestGetUserIDDoesNotLockDuringRequest(t *testing.T) {
 	}
 	client.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		if req.URL.Path != "/Users/Me" {
-			t.Fatalf("requête inattendue: %s", req.URL.Path)
+			t.Fatalf("unexpected request: %s", req.URL.Path)
 		}
 		requests.Add(1)
 		startOnce.Do(func() { close(requestStarted) })
@@ -198,7 +198,7 @@ func TestGetUserIDDoesNotLockDuringRequest(t *testing.T) {
 	select {
 	case <-requestStarted:
 	case <-time.After(time.Second):
-		t.Fatal("la requête de résolution n'a pas démarré")
+		t.Fatal("user ID resolution request did not start")
 	}
 
 	mutexAvailable := make(chan struct{})
@@ -210,7 +210,7 @@ func TestGetUserIDDoesNotLockDuringRequest(t *testing.T) {
 	select {
 	case <-mutexAvailable:
 	case <-time.After(time.Second):
-		t.Fatal("le mutex est conservé pendant la requête HTTP")
+		t.Fatal("mutex remained locked during the HTTP request")
 	}
 
 	close(releaseRequest)
@@ -223,6 +223,6 @@ func TestGetUserIDDoesNotLockDuringRequest(t *testing.T) {
 		}
 	}
 	if requests.Load() != 1 {
-		t.Fatalf("résolutions réseau = %d, attendu 1", requests.Load())
+		t.Fatalf("network resolutions = %d, want 1", requests.Load())
 	}
 }

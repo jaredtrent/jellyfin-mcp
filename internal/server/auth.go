@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-// validateHTTPAuth exige un jeton dès que l'écoute dépasse la boucle locale.
+// validateHTTPAuth requires a token whenever the listener is not loopback-only.
 func validateHTTPAuth(addr, token string) error {
 	if token == "" && httpTokenRequired(addr) {
 		return fmt.Errorf("--http-token is required when listening on non-localhost address %s", addr)
@@ -28,7 +28,7 @@ func httpTokenRequired(addr string) bool {
 	return ip == nil || !ip.IsLoopback()
 }
 
-// bearerAuth protège le handler avec une comparaison de jeton en temps constant.
+// bearerAuth protects the handler with a constant-time token comparison.
 func bearerAuth(next http.Handler, token string) http.Handler {
 	if token == "" {
 		return next

@@ -13,19 +13,19 @@ func TestValidateJellyfinURL(t *testing.T) {
 		raw     string
 		wantErr bool
 	}{
-		{name: "absent", raw: "", wantErr: true},
-		{name: "espaces", raw: "   ", wantErr: true},
+		{name: "missing", raw: "", wantErr: true},
+		{name: "whitespace", raw: "   ", wantErr: true},
 		{name: "placeholder", raw: "https://jellyfin_host:8920", wantErr: true},
-		{name: "placeholder majuscules", raw: "http://JELLYFIN_HOST:8096", wantErr: true},
-		{name: "schéma absent", raw: "jellyfin.local:8096", wantErr: true},
-		{name: "schéma invalide", raw: "ftp://jellyfin.local", wantErr: true},
-		{name: "hôte absent", raw: "http:///jellyfin", wantErr: true},
-		{name: "port invalide", raw: "http://jellyfin.local:abc", wantErr: true},
+		{name: "uppercase placeholder", raw: "http://JELLYFIN_HOST:8096", wantErr: true},
+		{name: "missing scheme", raw: "jellyfin.local:8096", wantErr: true},
+		{name: "invalid scheme", raw: "ftp://jellyfin.local", wantErr: true},
+		{name: "missing host", raw: "http:///jellyfin", wantErr: true},
+		{name: "invalid port", raw: "http://jellyfin.local:abc", wantErr: true},
 		{name: "http", raw: "http://jellyfin.local:8096"},
 		{name: "https", raw: "https://media.example.com"},
 		{name: "localhost", raw: "http://127.0.0.1:8096"},
 		{name: "ipv6", raw: "http://[::1]:8096"},
-		{name: "chemin reverse proxy", raw: "https://media.example.com/jellyfin/"},
+		{name: "reverse proxy path", raw: "https://media.example.com/jellyfin/"},
 	}
 
 	for _, tt := range tests {
@@ -44,17 +44,17 @@ func TestValidateClientConfig(t *testing.T) {
 
 	valid := ClientConfig{BaseURL: "http://localhost:8096", APIKey: "secret"}
 	if err := ValidateClientConfig(valid); err != nil {
-		t.Fatalf("configuration valide rejetée: %v", err)
+		t.Fatalf("valid configuration rejected: %v", err)
 	}
 
 	tests := []struct {
 		name string
 		cfg  ClientConfig
 	}{
-		{name: "clé API absente", cfg: ClientConfig{BaseURL: valid.BaseURL}},
-		{name: "URL absente", cfg: ClientConfig{APIKey: valid.APIKey}},
+		{name: "missing API key", cfg: ClientConfig{BaseURL: valid.BaseURL}},
+		{name: "missing URL", cfg: ClientConfig{APIKey: valid.APIKey}},
 		{
-			name: "identifiant strict absent",
+			name: "strict user ID missing",
 			cfg: ClientConfig{
 				BaseURL:       valid.BaseURL,
 				APIKey:        valid.APIKey,
@@ -66,7 +66,7 @@ func TestValidateClientConfig(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			if err := ValidateClientConfig(tt.cfg); err == nil {
-				t.Fatal("erreur attendue")
+				t.Fatal("expected an error")
 			}
 		})
 	}
@@ -75,7 +75,7 @@ func TestValidateClientConfig(t *testing.T) {
 	strict.RequireUserID = true
 	strict.UserID = "user-1"
 	if err := ValidateClientConfig(strict); err != nil {
-		t.Fatalf("configuration stricte valide rejetée: %v", err)
+		t.Fatalf("valid strict configuration rejected: %v", err)
 	}
 }
 
@@ -93,12 +93,12 @@ func TestLoadClientConfigFromEnv(t *testing.T) {
 		t.Fatalf("BaseURL = %q", cfg.BaseURL)
 	}
 	if cfg.APIKey != "secret" || cfg.UserID != "user-1" || !cfg.RequireUserID {
-		t.Fatalf("configuration inattendue: %+v", cfg)
+		t.Fatalf("unexpected configuration: %+v", cfg)
 	}
 
 	t.Setenv("JELLYFIN_REQUIRE_USER_ID", "not-a-boolean")
 	if _, err := LoadClientConfigFromEnv(); err == nil {
-		t.Fatal("valeur booléenne invalide acceptée")
+		t.Fatal("invalid boolean value accepted")
 	}
 }
 
@@ -121,9 +121,9 @@ func TestNewClientNormalizesURLWithoutLeakingAPIKey(t *testing.T) {
 		APIKey:  "do-not-leak-this",
 	})
 	if err == nil {
-		t.Fatal("URL invalide acceptée")
+		t.Fatal("invalid URL accepted")
 	}
 	if strings.Contains(err.Error(), "do-not-leak-this") {
-		t.Fatalf("la clé API apparaît dans l'erreur: %v", err)
+		t.Fatalf("API key leaked in error: %v", err)
 	}
 }

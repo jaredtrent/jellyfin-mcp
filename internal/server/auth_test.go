@@ -22,13 +22,13 @@ func TestHTTPTokenRequired(t *testing.T) {
 		{addr: ":8080", want: true},
 		{addr: "192.168.1.20:8080", want: true},
 		{addr: "jellyfin.local:8080", want: true},
-		{addr: "adresse-invalide", want: true},
+		{addr: "invalid-address", want: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.addr, func(t *testing.T) {
 			t.Parallel()
 			if got := httpTokenRequired(tt.addr); got != tt.want {
-				t.Fatalf("httpTokenRequired(%q) = %v, attendu %v", tt.addr, got, tt.want)
+				t.Fatalf("httpTokenRequired(%q) = %v, want %v", tt.addr, got, tt.want)
 			}
 		})
 	}
@@ -38,13 +38,13 @@ func TestValidateHTTPAuth(t *testing.T) {
 	t.Parallel()
 
 	if err := validateHTTPAuth("127.0.0.1:8080", ""); err != nil {
-		t.Fatalf("écoute locale rejetée: %v", err)
+		t.Fatalf("local listener rejected: %v", err)
 	}
 	if err := validateHTTPAuth("0.0.0.0:8080", "secret"); err != nil {
-		t.Fatalf("écoute authentifiée rejetée: %v", err)
+		t.Fatalf("authenticated listener rejected: %v", err)
 	}
 	if err := validateHTTPAuth("0.0.0.0:8080", ""); err == nil {
-		t.Fatal("écoute non locale sans jeton acceptée")
+		t.Fatal("non-local listener without a token accepted")
 	}
 }
 
@@ -58,22 +58,22 @@ func TestBearerAuth(t *testing.T) {
 		wantStatus    int
 		wantCalled    bool
 	}{
-		{name: "auth désactivée", wantStatus: http.StatusNoContent, wantCalled: true},
-		{name: "jeton absent", token: "secret", wantStatus: http.StatusUnauthorized},
+		{name: "authentication disabled", wantStatus: http.StatusNoContent, wantCalled: true},
+		{name: "missing token", token: "secret", wantStatus: http.StatusUnauthorized},
 		{
-			name:          "schéma invalide",
+			name:          "invalid scheme",
 			token:         "secret",
 			authorization: "Basic secret",
 			wantStatus:    http.StatusUnauthorized,
 		},
 		{
-			name:          "jeton invalide",
+			name:          "invalid token",
 			token:         "secret",
 			authorization: "Bearer wrong",
 			wantStatus:    http.StatusUnauthorized,
 		},
 		{
-			name:          "jeton valide",
+			name:          "valid token",
 			token:         "secret",
 			authorization: "Bearer secret",
 			wantStatus:    http.StatusNoContent,
@@ -98,10 +98,10 @@ func TestBearerAuth(t *testing.T) {
 			handler.ServeHTTP(response, request)
 
 			if response.Code != tt.wantStatus {
-				t.Fatalf("statut = %d, attendu %d", response.Code, tt.wantStatus)
+				t.Fatalf("status = %d, want %d", response.Code, tt.wantStatus)
 			}
 			if called != tt.wantCalled {
-				t.Fatalf("handler appelé = %v, attendu %v", called, tt.wantCalled)
+				t.Fatalf("handler called = %v, want %v", called, tt.wantCalled)
 			}
 		})
 	}

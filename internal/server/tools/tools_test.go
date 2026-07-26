@@ -107,13 +107,13 @@ func TestDisableDestructiveRemovesDestructiveTools(t *testing.T) {
 	}
 	for _, toolName := range destructiveTools {
 		if registered[toolName] {
-			t.Errorf("%s reste enregistré avec --disable-destructive", toolName)
+			t.Errorf("%s remains registered with --disable-destructive", toolName)
 		}
 		if _, err := session.CallTool(t.Context(), &mcp.CallToolParams{
 			Name:      toolName,
 			Arguments: map[string]any{"confirm": true},
 		}); err == nil {
-			t.Errorf("%s reste appelable avec --disable-destructive", toolName)
+			t.Errorf("%s remains callable with --disable-destructive", toolName)
 		}
 	}
 }

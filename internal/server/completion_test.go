@@ -75,10 +75,10 @@ func TestUserCompletionFollowsAdminSurface(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(hiddenResult.Completion.Values) != 0 {
-		t.Fatalf("complétions exposées sans surface admin: %v", hiddenResult.Completion.Values)
+		t.Fatalf("completions exposed without admin access: %v", hiddenResult.Completion.Values)
 	}
 	if client.usersCalls.Load() != 0 {
-		t.Fatal("/Users appelé alors que la surface admin est masquée")
+		t.Fatal("/Users called while admin access is hidden")
 	}
 
 	visibleResult, err := completionHandler(client, true)(context.Background(), request)
@@ -86,9 +86,9 @@ func TestUserCompletionFollowsAdminSurface(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(visibleResult.Completion.Values) != 1 || visibleResult.Completion.Values[0] != "user-1" {
-		t.Fatalf("complétions admin inattendues: %v", visibleResult.Completion.Values)
+		t.Fatalf("unexpected admin completions: %v", visibleResult.Completion.Values)
 	}
 	if client.usersCalls.Load() != 1 {
-		t.Fatalf("appels /Users = %d, attendu 1", client.usersCalls.Load())
+		t.Fatalf("/Users calls = %d, want 1", client.usersCalls.Load())
 	}
 }
