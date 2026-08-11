@@ -7,6 +7,8 @@
 
 MCP server that connects AI assistants to your [Jellyfin](https://jellyfin.org) media server — 31 tools, 13 live resources, and 18 guided workflows. Search your library, control playback, manage metadata, find subtitles, troubleshoot your server, and more.
 
+This project is not associated with the official Jellyfish project or team. It's a fan project.
+
 **[Setup](#setup)** · **[Transport](#transport)** · **[Options](#options)** · **[MCP capabilities](#mcp-capabilities)** · **[Important notes](#important-notes)**
 
 ## What can it do?
