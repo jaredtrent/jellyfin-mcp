@@ -77,9 +77,10 @@ Any client that supports the `mcpServers` JSON format (Cursor, VS Code Copilot, 
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `JELLYFIN_API_KEY` | Yes | — | API key from your Jellyfin dashboard |
-| `JELLYFIN_URL` | No | — | Server URL, e.g. `http://YOUR_SERVER:8096` (or `https://YOUR_SERVER:8920` if HTTPS is enabled) |
+| `JELLYFIN_API_KEY` | Yes | None | API key from your Jellyfin dashboard |
+| `JELLYFIN_URL` | Yes | None | Jellyfin server HTTP(S) URL. The `jellyfin_host` placeholder is rejected at startup. |
 | `JELLYFIN_USER_ID` | No | auto-detected | User ID for user-scoped operations |
+| `JELLYFIN_REQUIRE_USER_ID` | No | `false` | When `true` or `1`, require `JELLYFIN_USER_ID` and disable automatic user selection, including admin fallback. `--read-only` does not enable this strict mode. |
 
 ## CLI flags
 
@@ -92,7 +93,7 @@ Append flags after the package name in the `args` array:
 | Flag | Description |
 |------|-------------|
 | `--toolsets` | Comma-separated groups: `discovery`, `media`, `user`, `playback`, `admin`, `content`, `analytics`, `livetv` |
-| `--read-only` | Only register read-only tools |
+| `--read-only` | Only register read-only tools and hide admin-oriented user resources and completions |
 | `--disable-destructive` | Skip destructive tools (delete, restart, shutdown) |
 
 ## Tools (31)

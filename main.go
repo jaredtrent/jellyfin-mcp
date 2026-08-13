@@ -45,9 +45,10 @@ func usageTemplate() string {
   {{.UseLine}}{{end}}
 
 Environment variables:
-  JELLYFIN_URL        Server URL (default: https://jellyfin_host:8920)
-  JELLYFIN_API_KEY    API key (required)
-  JELLYFIN_USER_ID    User ID (optional, auto-detected if not set)
+  JELLYFIN_URL              Jellyfin server HTTP(S) URL (required)
+  JELLYFIN_API_KEY          API key (required)
+  JELLYFIN_USER_ID          User ID (optional, auto-detected when omitted)
+  JELLYFIN_REQUIRE_USER_ID  Require JELLYFIN_USER_ID and disable admin fallback
 
 Flags:
 {{.LocalFlags.FlagUsages | trimTrailingWhitespaces}}

@@ -11,7 +11,23 @@ import (
 	jf "github.com/jaredtrent/jellyfin-mcp/internal/jellyfin"
 )
 
-func RegisterResources(server *mcp.Server, client jf.Client) {
+// AdminResourcesEnabled applies the admin tool surface to resources.
+func AdminResourcesEnabled(readOnly bool, toolsets string) bool {
+	if readOnly {
+		return false
+	}
+	if toolsets == "" {
+		return true
+	}
+	for _, toolset := range strings.Split(toolsets, ",") {
+		if strings.TrimSpace(toolset) == "admin" {
+			return true
+		}
+	}
+	return false
+}
+
+func RegisterResources(server *mcp.Server, client jf.Client, includeAdmin bool) {
 
 	// --- jellyfin://server/info ---
 	server.AddResource(&mcp.Resource{
@@ -341,30 +357,32 @@ func RegisterResources(server *mcp.Server, client jf.Client) {
 	})
 
 	// --- jellyfin://users ---
-	server.AddResource(&mcp.Resource{
-		URI:         "jellyfin://users",
-		Name:        "User Accounts",
-		Title:       "Users",
-		Description: "All user accounts with admin status and last activity",
-		MIMEType:    "application/json",
-		Annotations: &mcp.Annotations{Audience: []mcp.Role{"assistant"}, Priority: 0.4},
-	}, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
-		var users []map[string]any
-		if err := client.Get(ctx, "/Users", nil, &users); err != nil {
-			return nil, fmt.Errorf("failed to get users: %w", err)
-		}
-		items := make([]map[string]any, 0, len(users))
-		for _, u := range users {
-			items = append(items, jf.ExtractUserSummary(u))
-		}
-		return &mcp.ReadResourceResult{
-			Contents: []*mcp.ResourceContents{{
-				URI:      "jellyfin://users",
-				MIMEType: "application/json",
-				Text:     jf.FormatJSON(items),
-			}},
-		}, nil
-	})
+	if includeAdmin {
+		server.AddResource(&mcp.Resource{
+			URI:         "jellyfin://users",
+			Name:        "User Accounts",
+			Title:       "Users",
+			Description: "All user accounts with admin status and last activity",
+			MIMEType:    "application/json",
+			Annotations: &mcp.Annotations{Audience: []mcp.Role{"assistant"}, Priority: 0.4},
+		}, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+			var users []map[string]any
+			if err := client.Get(ctx, "/Users", nil, &users); err != nil {
+				return nil, fmt.Errorf("failed to get users: %w", err)
+			}
+			items := make([]map[string]any, 0, len(users))
+			for _, u := range users {
+				items = append(items, jf.ExtractUserSummary(u))
+			}
+			return &mcp.ReadResourceResult{
+				Contents: []*mcp.ResourceContents{{
+					URI:      "jellyfin://users",
+					MIMEType: "application/json",
+					Text:     jf.FormatJSON(items),
+				}},
+			}, nil
+		})
+	}
 
 	// --- Reference Guides ---
 	registerGuides(server)
@@ -402,31 +420,33 @@ func RegisterResources(server *mcp.Server, client jf.Client) {
 	})
 
 	// --- jellyfin://users/{userId} (template) ---
-	server.AddResourceTemplate(&mcp.ResourceTemplate{
-		URITemplate: "jellyfin://users/{userId}",
-		Name:        "User Profile",
-		Title:       "User Profile",
-		Description: "User account details and policy settings",
-		MIMEType:    "application/json",
-		Annotations: &mcp.Annotations{Audience: []mcp.Role{"assistant"}, Priority: 0.5},
-	}, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
-		userID := strings.TrimPrefix(req.Params.URI, "jellyfin://users/")
-		if userID == "" {
-			return nil, fmt.Errorf("user ID is required in URI")
-		}
-		var user map[string]any
-		endpoint := fmt.Sprintf("/Users/%s", jf.SanitizeID(userID))
-		if err := client.Get(ctx, endpoint, nil, &user); err != nil {
-			return nil, fmt.Errorf("failed to get user: %w", err)
-		}
-		return &mcp.ReadResourceResult{
-			Contents: []*mcp.ResourceContents{{
-				URI:      req.Params.URI,
-				MIMEType: "application/json",
-				Text:     jf.FormatJSON(jf.ExtractDetailedUser(user)),
-			}},
-		}, nil
-	})
+	if includeAdmin {
+		server.AddResourceTemplate(&mcp.ResourceTemplate{
+			URITemplate: "jellyfin://users/{userId}",
+			Name:        "User Profile",
+			Title:       "User Profile",
+			Description: "User account details and policy settings",
+			MIMEType:    "application/json",
+			Annotations: &mcp.Annotations{Audience: []mcp.Role{"assistant"}, Priority: 0.5},
+		}, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+			userID := strings.TrimPrefix(req.Params.URI, "jellyfin://users/")
+			if userID == "" {
+				return nil, fmt.Errorf("user ID is required in URI")
+			}
+			var user map[string]any
+			endpoint := fmt.Sprintf("/Users/%s", jf.SanitizeID(userID))
+			if err := client.Get(ctx, endpoint, nil, &user); err != nil {
+				return nil, fmt.Errorf("failed to get user: %w", err)
+			}
+			return &mcp.ReadResourceResult{
+				Contents: []*mcp.ResourceContents{{
+					URI:      req.Params.URI,
+					MIMEType: "application/json",
+					Text:     jf.FormatJSON(jf.ExtractDetailedUser(user)),
+				}},
+			}, nil
+		})
+	}
 
 	// --- jellyfin://libraries/{libraryId}/latest (template) ---
 	server.AddResourceTemplate(&mcp.ResourceTemplate{

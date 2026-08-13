@@ -290,8 +290,9 @@ Image tags: `latest` (latest build from `main`), the full version from release t
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `JELLYFIN_API_KEY` | Yes | API key from your Jellyfin dashboard |
-| `JELLYFIN_URL` | No | Server URL — e.g. `http://YOUR_SERVER:8096`, or `https://YOUR_SERVER:8920` if HTTPS is enabled. Defaults to a placeholder, so set this. |
-| `JELLYFIN_USER_ID` | No | User ID — auto-detected from the API key if not set |
+| `JELLYFIN_URL` | Yes | Jellyfin server HTTP(S) URL, for example `http://YOUR_SERVER:8096` or `https://YOUR_SERVER:8920`. The `jellyfin_host` placeholder is rejected at startup. |
+| `JELLYFIN_USER_ID` | No | User ID, auto-detected from the API key when omitted |
+| `JELLYFIN_REQUIRE_USER_ID` | No | When `true` or `1`, require `JELLYFIN_USER_ID` and disable automatic user selection, including admin fallback |
 
 ### Toolsets
 
@@ -343,6 +344,10 @@ Beyond tools, jellyfin-mcp implements several MCP protocol features that compati
 ## Important notes
 
 **API key permissions** — The API key grants full access to whatever Jellyfin permissions are available. For shared or less trusted setups, pair it with `--read-only` or `--toolsets` to limit what the AI can do.
+
+`--read-only` limits the tool surface, but it does not enable strict user selection. To prevent admin fallback, set an explicit `JELLYFIN_USER_ID` and `JELLYFIN_REQUIRE_USER_ID=true`.
+
+With `--read-only`, or when `--toolsets` does not include `admin`, the `jellyfin://users` and `jellyfin://users/{userId}` resources are not exposed, and user ID completion does not call `/Users`.
 
 **Network exposure** — In stdio mode, the server is only accessible to the local MCP client process. In HTTP mode, use `--http-token` whenever the server is reachable beyond localhost. The server refuses to start on a non-localhost address without a token.
 
