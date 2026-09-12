@@ -45,6 +45,13 @@ func NewJellyfinClient() *JellyfinClient {
 	}
 }
 
+// setAuthHeader authenticates using the Authorization header. Jellyfin 12.0+
+// ignores the legacy X-MediaBrowser-Token/X-Emby-Token headers unless
+// EnableLegacyAuthorization is turned on.
+func (c *JellyfinClient) setAuthHeader(req *http.Request) {
+	req.Header.Set("Authorization", fmt.Sprintf(`MediaBrowser Token="%s"`, c.apiKey))
+}
+
 func (c *JellyfinClient) DoRequest(ctx context.Context, method, endpoint string, params url.Values, body any) ([]byte, error) {
 	u, err := url.JoinPath(c.baseURL, endpoint)
 	if err != nil {
@@ -67,7 +74,7 @@ func (c *JellyfinClient) DoRequest(ctx context.Context, method, endpoint string,
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
-	req.Header.Set("X-MediaBrowser-Token", c.apiKey)
+	c.setAuthHeader(req)
 	req.Header.Set("Accept", "application/json")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -141,7 +148,7 @@ func (c *JellyfinClient) PostRaw(ctx context.Context, endpoint string, params ur
 	if err != nil {
 		return fmt.Errorf("creating request: %w", err)
 	}
-	req.Header.Set("X-MediaBrowser-Token", c.apiKey)
+	c.setAuthHeader(req)
 	req.Header.Set("Content-Type", contentType)
 
 	resp, err := c.httpClient.Do(req)

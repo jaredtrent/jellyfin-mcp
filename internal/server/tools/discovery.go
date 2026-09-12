@@ -494,7 +494,7 @@ func RegisterDiscoveryTools(server *mcp.Server, client jf.Client, enabled func(s
 				return jf.TextResult(fmt.Sprintf("Media segments (%d):\n\n%s", len(segments), jf.FormatJSON(segments))), nil, nil
 
 			case "download_url":
-				downloadURL := fmt.Sprintf("%s/Items/%s/Download?api_key=%s", client.BaseURL(), args.ItemID, client.APIKey())
+				downloadURL := fmt.Sprintf("%s/Items/%s/Download?ApiKey=%s", client.BaseURL(), args.ItemID, client.APIKey())
 				return jf.TextResult(fmt.Sprintf("WARNING: This URL contains an embedded API key. Do not share it publicly or log it in untrusted contexts.\n\nDownload URL:\n%s", downloadURL)), nil, nil
 
 			default:
