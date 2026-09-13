@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -210,13 +211,18 @@ func FetchAllPages(ctx context.Context, client Client, endpoint string, params u
 }
 
 // GetUserID returns the cached user ID, fetching on first call.
-// Resolution order: JELLYFIN_USER_ID env var -> /Users/Me (token-authenticated
-// user) -> first admin user from /Users.
+// Resolution order: JELLYFIN_USER_ID env var (GUID or username) -> /Users/Me
+// (token-authenticated user) -> first admin user from /Users.
 func (c *JellyfinClient) GetUserID(ctx context.Context) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.userID != "" {
+	if c.userID != "" && looksLikeGUID(c.userID) {
 		return c.userID, nil
+	}
+	preferredName := ""
+	if c.userID != "" {
+		preferredName = c.userID
+		c.userID = ""
 	}
 
 	// Try /Users/Me first -- works when the API token is a user auth token
@@ -237,6 +243,19 @@ func (c *JellyfinClient) GetUserID(ctx context.Context) (string, error) {
 	}
 	if len(users) == 0 {
 		return "", fmt.Errorf("no users found on Jellyfin server")
+	}
+
+	if preferredName != "" {
+		for _, u := range users {
+			name, _ := u["Name"].(string)
+			id, ok := u["Id"].(string)
+			if ok && id != "" && strings.EqualFold(name, preferredName) {
+				log.Printf("resolved JELLYFIN_USER_ID %q to user ID: %s", preferredName, id)
+				c.userID = id
+				return id, nil
+			}
+		}
+		return "", fmt.Errorf("JELLYFIN_USER_ID %q did not match any Jellyfin user", preferredName)
 	}
 
 	// Prefer an admin user for broader API access
@@ -264,4 +283,18 @@ func (c *JellyfinClient) GetUserID(ctx context.Context) (string, error) {
 	log.Printf("WARNING: no admin user found, using first user ID: %s (set JELLYFIN_USER_ID to override)", fallbackID)
 	c.userID = fallbackID
 	return fallbackID, nil
+}
+
+func looksLikeGUID(s string) bool {
+	if len(s) != 32 && len(s) != 36 {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9', r >= 'a' && r <= 'f', r >= 'A' && r <= 'F', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }

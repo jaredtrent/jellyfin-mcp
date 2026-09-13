@@ -114,7 +114,12 @@ func startResourcePoller(ctx context.Context, server *mcp.Server, client jf.Clie
 			if !tracker.active() {
 				return
 			}
-			params := url.Values{"Limit": {"20"}}
+			userID, err := client.GetUserID(ctx)
+			if err != nil {
+				log.Printf("poll latest: %v", err)
+				return
+			}
+			params := url.Values{"Limit": {"20"}, "UserId": {userID}}
 			data, err := client.DoRequest(ctx, "GET", "/Items/Latest", params, nil)
 			if err != nil {
 				log.Printf("poll latest: %v", err)
