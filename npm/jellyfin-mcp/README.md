@@ -4,9 +4,7 @@ jellyfin-mcp connects an AI assistant to your [Jellyfin](https://jellyfin.org) s
 
 It's an MCP server with 31 tools, 13 live resources, and 19 guided workflows.
 
-This package bundles a compiled native binary. Nothing runs on Node.js; npm is the delivery mechanism.
-
-The [GitHub repository](https://github.com/jaredtrent/jellyfin-mcp) holds the source and the other install methods, such as the binary download and `go install`.
+This package bundles a compiled linux/x64 binary for MetaMCP and other Docker-based MCP gateways, and nothing runs on Node.js. On macOS, Windows, or ARM, npm doesn't install it; use the one-command install or the binary download from the [GitHub repository](https://github.com/jaredtrent/jellyfin-mcp#2-install-jellyfin-mcp) instead.
 
 ## Quick Start
 
@@ -30,30 +28,7 @@ Add the server to your MCP client configuration:
 Replace `JELLYFIN_URL` with your Jellyfin server address and `JELLYFIN_API_KEY` with an API key from your Jellyfin dashboard (Dashboard > Advanced > API Keys).
 
 <details>
-<summary>Claude Desktop</summary>
-
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS), `%APPDATA%\Claude\claude_desktop_config.json` (Windows), or `~/.config/Claude/claude_desktop_config.json` (Linux):
-
-```json
-{
-  "mcpServers": {
-    "jellyfin-mcp": {
-      "command": "npx",
-      "args": ["-y", "@jaredtrent/jellyfin-mcp"],
-      "env": {
-        "JELLYFIN_URL": "http://YOUR_SERVER:8096",
-        "JELLYFIN_API_KEY": "your_api_key"
-      }
-    }
-  }
-}
-```
-
-Restart Claude Desktop after saving.
-</details>
-
-<details>
-<summary>Claude Code</summary>
+<summary>Claude Code on Linux x64</summary>
 
 ```sh
 claude mcp add -s user jellyfin-mcp \
@@ -72,7 +47,7 @@ Add as a STDIO server in the MetaMCP dashboard using the JSON config above. Envi
 <details>
 <summary>Other MCP clients</summary>
 
-Any client that reads the `mcpServers` JSON format, such as Cursor, VS Code Copilot, Windsurf, and OpenCode, takes the configuration above. The client's documentation names its configuration file.
+On Linux x64, any client that reads the `mcpServers` JSON format, such as Cursor, VS Code Copilot, Windsurf, and OpenCode, takes the configuration above. The client's documentation names its configuration file.
 </details>
 
 ## Environment Variables
@@ -98,7 +73,7 @@ Append flags after the package name in the `args` array:
 | `--read-only` | Register only the tools that read |
 | `--disable-destructive` | Refuse destructive actions (deletes, removals, restores, uninstalls, restarts, shutdowns, revocations, cancellations, version merges and splits, and password, policy, trigger, and whole-configuration changes) and allow every other write |
 
-## Tools (30)
+## Tools (31)
 
 <details>
 <summary><strong>discovery</strong>: search, browse, recommendations</summary>
@@ -196,10 +171,6 @@ Multi-step workflows: `find-and-play`, `resume-watching`, `whats-new`, `movie-ni
 - A destructive action confirms with you before it runs, through a confirmation form in a client that supports MCP elicitation, and otherwise through a warning the assistant presents before it repeats the call with `confirm=true`. On a client older than MCP 2026-07-28, a form left unanswered for 10 minutes expires, and nothing is done.
 - `--read-only` and `--disable-destructive` restrict what the assistant can change.
 - `--toolsets` exposes only the tool groups you name.
-
-## Platform
-
-This package holds a linux/x64 binary. For macOS, Windows, or ARM, the [GitHub repository](https://github.com/jaredtrent/jellyfin-mcp#2-install-jellyfin-mcp) has binary downloads and `go install`.
 
 ## License
 
