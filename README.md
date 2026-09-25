@@ -5,9 +5,11 @@
 [![Go](https://img.shields.io/badge/Go-1.26+-00ADD8.svg)](https://go.dev)
 [![npm](https://img.shields.io/npm/v/@jaredtrent/jellyfin-mcp)](https://www.npmjs.com/package/@jaredtrent/jellyfin-mcp)
 
-An MCP server that connects an AI assistant to your [Jellyfin](https://jellyfin.org) media server, with 31 tools, 13 live resources, and 19 guided workflows.
+jellyfin-mcp connects an AI assistant to your [Jellyfin](https://jellyfin.org) server, so you can ask about your library and manage it in plain language. The assistant answers from what you actually own and acts on your server, whether you're deciding what to watch, keeping the library in order, or looking after the server itself.
 
-Once connected, the assistant searches your library, starts playback on your devices, fixes metadata, finds subtitles, and reads the server's logs when something goes wrong. It works from your own library, so a recommendation is always something you can play.
+Ask for anything you'd otherwise click through Jellyfin to find or do. For example, the assistant can recommend a film you haven't seen for tonight, start the next episode on the living room TV, fix a poster that matched the wrong movie, find subtitles for a new download, or read the logs to work out why a stream keeps buffering. Anything that changes your server, such as a delete or a restart, waits for your confirmation.
+
+It works with Claude Desktop, Claude Code, and other MCP clients, through 31 tools, 13 live resources, and 19 guided workflows.
 
 jellyfin-mcp is a fan project. It isn't associated with the Jellyfin project or its team.
 

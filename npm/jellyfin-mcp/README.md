@@ -1,6 +1,8 @@
 # @jaredtrent/jellyfin-mcp
 
-An MCP server that connects an AI assistant to your [Jellyfin](https://jellyfin.org) media server, with 31 tools, 13 live resources, and 19 guided workflows. The assistant searches your library, controls playback, fixes metadata, finds subtitles, and troubleshoots the server.
+jellyfin-mcp connects an AI assistant to your [Jellyfin](https://jellyfin.org) server, so you can ask about your library and manage it in plain language. The assistant answers from what you actually own and acts on your server, whether you're deciding what to watch, keeping the library in order, or looking after the server itself.
+
+It's an MCP server with 31 tools, 13 live resources, and 19 guided workflows.
 
 This package bundles a compiled native binary. Nothing runs on Node.js; npm is the delivery mechanism.
 
