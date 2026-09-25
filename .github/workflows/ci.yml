@@ -6,18 +6,31 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
       - name: Vet
         run: go vet ./...
 
+      # Built with the Go version above, as golangci-lint must be at least as
+      # new as the Go it checks.
+      - name: Lint
+        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0 run ./...
+
       - name: Test
         run: go test ./...
+
+      # Fails on a known vulnerability reachable from this code, in a
+      # dependency or in the standard library of the Go toolchain in use.
+      - name: Vulnerability check
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...

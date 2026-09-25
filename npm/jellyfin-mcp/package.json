@@ -1,6 +1,6 @@
 {
   "name": "@jaredtrent/jellyfin-mcp",
-  "version": "2026.604.2",
+  "version": "2026.924.1",
   "description": "MCP server for Jellyfin media server",
   "bin": {
     "jellyfin-mcp": "bin/jellyfin-mcp"

@@ -2,120 +2,167 @@ package jellyfin
 
 import "fmt"
 
-func ExtractMediaItem(m map[string]any) map[string]any {
+// MediaItemFrom is the compact form of a raw Jellyfin item, as lists show
+// it. The overview is truncated to OverviewMaxLen. last_played and date_added
+// are set by the callers whose lists are ordered or filtered by them.
+func MediaItemFrom(m map[string]any) MediaItem {
 	if m == nil {
-		return map[string]any{}
+		return MediaItem{}
 	}
-	item := map[string]any{
-		"id":   GetString(m, "Id"),
-		"name": GetString(m, "Name"),
-		"type": GetString(m, "Type"),
+	item := MediaItem{
+		ID:   GetString(m, "Id"),
+		Name: GetString(m, "Name"),
+		Type: GetString(m, "Type"),
 	}
 	if year := GetIntPtr(m, "ProductionYear"); year != nil {
-		item["year"] = *year
+		item.Year = *year
 	}
-	if overview := GetString(m, "Overview"); overview != "" {
-		item["overview"] = Truncate(overview, OverviewMaxLen)
-	}
+	item.Overview = Truncate(GetString(m, "Overview"), OverviewMaxLen)
 	if rating := GetFloat(m, "CommunityRating"); rating > 0 {
-		item["community_rating"] = rating
+		item.CommunityRating = rating
 	}
-	if official := GetString(m, "OfficialRating"); official != "" {
-		item["official_rating"] = official
-	}
+	item.OfficialRating = GetString(m, "OfficialRating")
 	if rt := GetInt64(m, "RunTimeTicks"); rt > 0 {
-		item["runtime_minutes"] = rt / TicksPerMinute
+		item.RuntimeMinutes = rt / TicksPerMinute
 	}
-	// User data (played/favorite/progress)
 	if ud := ToMap(m["UserData"]); ud != nil {
-		if GetBool(ud, "Played") {
-			item["played"] = true
-		}
-		if pct := GetFloat(ud, "PlayedPercentage"); pct > 0 {
-			item["progress"] = fmt.Sprintf("%.0f%%", pct)
-		}
-		if GetBool(ud, "IsFavorite") {
-			item["favorite"] = true
-		}
+		item.Played = GetBool(ud, "Played")
+		item.Progress = progressOf(ud)
+		item.Favorite = GetBool(ud, "IsFavorite")
 	}
-	// Series context for episodes
-	if sn := GetString(m, "SeriesName"); sn != "" {
-		item["series_name"] = sn
-	}
+	item.SeriesName = GetString(m, "SeriesName")
 	if idx := GetInt(m, "IndexNumber"); idx > 0 {
-		item["index_number"] = idx
+		item.IndexNumber = idx
 	}
 	if pidx := GetInt(m, "ParentIndexNumber"); pidx > 0 {
-		item["parent_index_number"] = pidx
+		item.ParentIndexNumber = pidx
+	}
+	// Only Live TV programs and recordings carry a StartDate, and for them
+	// StartDate and EndDate are instants. A series' EndDate is a calendar day
+	// instead, which is why EndDate is read only beside a StartDate.
+	if start := GetString(m, "StartDate"); start != "" {
+		item.StartTime = LocalDateTime(start)
+		if end := GetString(m, "EndDate"); end != "" {
+			item.EndTime = LocalDateTime(end)
+		}
+		item.ChannelName = GetString(m, "ChannelName")
 	}
 	return item
 }
 
-func ExtractDetailedItem(m map[string]any) map[string]any {
-	item := ExtractMediaItem(m)
+// MediaItemsFrom is MediaItemFrom over a list of raw items, skipping entries
+// that are not objects. It never returns nil.
+func MediaItemsFrom(items []any) []MediaItem {
+	out := make([]MediaItem, 0, len(items))
+	for _, raw := range items {
+		if m := ToMap(raw); m != nil {
+			out = append(out, MediaItemFrom(m))
+		}
+	}
+	return out
+}
 
-	// Full overview (not truncated)
-	if overview := GetString(m, "Overview"); overview != "" {
-		item["overview"] = overview
+// ItemsFrom is MediaItemsFrom over the Items of a query result.
+func ItemsFrom(result map[string]any) []MediaItem {
+	return MediaItemsFrom(ToSlice(result["Items"]))
+}
+
+// progressOf is a user-data PlayedPercentage as a whole percentage, or ""
+// when playback is not in progress.
+func progressOf(ud map[string]any) string {
+	if pct := GetFloat(ud, "PlayedPercentage"); pct > 0 {
+		return fmt.Sprintf("%.0f%%", pct)
+	}
+	return ""
+}
+
+// LastPlayedOf is a raw item's LastPlayedDate as Jellyfin reports it, or ""
+// when the user never played it.
+func LastPlayedOf(m map[string]any) string {
+	if ud := ToMap(m["UserData"]); ud != nil {
+		return GetString(ud, "LastPlayedDate")
+	}
+	return ""
+}
+
+// DetailedItemFrom is the full form of a raw Jellyfin item, as
+// jellyfin_get_item and the item resource show it.
+func DetailedItemFrom(m map[string]any) DetailedItemOutput {
+	compact := MediaItemFrom(m)
+	item := DetailedItemOutput{
+		ID:                compact.ID,
+		Name:              compact.Name,
+		Type:              compact.Type,
+		Year:              compact.Year,
+		Overview:          GetString(m, "Overview"),
+		CommunityRating:   compact.CommunityRating,
+		OfficialRating:    compact.OfficialRating,
+		RuntimeMinutes:    compact.RuntimeMinutes,
+		SeriesName:        compact.SeriesName,
+		IndexNumber:       compact.IndexNumber,
+		ParentIndexNumber: compact.ParentIndexNumber,
+		Played:            compact.Played,
+		Progress:          compact.Progress,
+		Favorite:          compact.Favorite,
 	}
 
 	// Dates
-	if pd := GetString(m, "PremiereDate"); pd != "" {
-		item["premiere_date"] = Truncate(pd, DateOnlyLen)
+	if dc := GetString(m, "DateCreated"); dc != "" {
+		item.DateAdded = LocalDate(dc)
 	}
-	if ed := GetString(m, "EndDate"); ed != "" {
-		item["end_date"] = Truncate(ed, DateOnlyLen)
-	}
+	item.PremiereDate = Truncate(GetString(m, "PremiereDate"), DateOnlyLen)
+	item.EndDate = Truncate(GetString(m, "EndDate"), DateOnlyLen)
+	item.OriginalLanguage = GetString(m, "OriginalLanguage")
 
-	// Ratings
 	if cr := GetFloat(m, "CriticRating"); cr > 0 {
-		item["critic_rating"] = cr
+		item.CriticRating = cr
 	}
 
-	if tl := ToStringSlice(m["Taglines"]); len(tl) > 0 {
-		item["taglines"] = tl
-	}
-	if gl := ToStringSlice(m["Genres"]); len(gl) > 0 {
-		item["genres"] = gl
-	}
-
-	// Studios
-	if studios := ToSlice(m["Studios"]); len(studios) > 0 {
-		sl := make([]string, 0, len(studios))
-		for _, s := range studios {
-			sm := ToMap(s)
-			if sm != nil {
-				sl = append(sl, GetString(sm, "Name"))
-			}
-		}
-		if len(sl) > 0 {
-			item["studios"] = sl
+	item.Taglines = ToStringSlice(m["Taglines"])
+	// The list fields serialize as [] when empty, so that "none" is stated
+	// and a metadata update that replaces a list can be judged from them.
+	item.Genres = nonNil(ToStringSlice(m["Genres"]))
+	item.Tags = nonNil(ToStringSlice(m["Tags"]))
+	item.LockedFields = nonNil(ToStringSlice(m["LockedFields"]))
+	item.Studios = []string{}
+	for _, s := range ToSlice(m["Studios"]) {
+		if sm := ToMap(s); sm != nil {
+			item.Studios = append(item.Studios, GetString(sm, "Name"))
 		}
 	}
 
-	// People (top 15)
-	if people := ToSlice(m["People"]); len(people) > 0 {
-		pl := make([]map[string]any, 0, MaxPeopleInDetail)
-		for i, p := range people {
-			if i >= MaxPeopleInDetail {
-				break
-			}
-			pm := ToMap(p)
-			if pm == nil {
-				continue
-			}
-			person := map[string]any{
-				"name": GetString(pm, "Name"),
-				"type": GetString(pm, "Type"),
-			}
-			if role := GetString(pm, "Role"); role != "" {
-				person["role"] = role
-			}
-			pl = append(pl, person)
+	people := ToSlice(m["People"])
+	if len(people) > MaxPeopleInDetail {
+		item.Notes = append(item.Notes, fmt.Sprintf("people lists the first %d of %d cast and crew. To check whether someone else appears in this item, use jellyfin_browse with person set to their name.", MaxPeopleInDetail, len(people)))
+	}
+	for i, p := range people {
+		if i >= MaxPeopleInDetail {
+			break
 		}
-		if len(pl) > 0 {
-			item["people"] = pl
+		pm := ToMap(p)
+		if pm == nil {
+			continue
 		}
+		item.People = append(item.People, PersonInfo{
+			Name: GetString(pm, "Name"),
+			Type: GetString(pm, "Type"),
+			Role: GetString(pm, "Role"),
+		})
+	}
+
+	// Chapters, each with its start as a clock time to read and in ticks to
+	// seek to.
+	for _, c := range ToSlice(m["Chapters"]) {
+		cm := ToMap(c)
+		if cm == nil {
+			continue
+		}
+		ticks := GetNum[int64](cm, "StartPositionTicks")
+		item.Chapters = append(item.Chapters, ChapterInfo{
+			Name:       GetString(cm, "Name"),
+			Start:      clockTime(ticks),
+			StartTicks: ticks,
+		})
 	}
 
 	// Provider IDs (IMDb, TMDB, TVDB) with direct URLs
@@ -127,228 +174,176 @@ func ExtractDetailedItem(m map[string]any) map[string]any {
 			}
 		}
 		if len(providerIDs) > 0 {
-			item["provider_ids"] = providerIDs
+			item.ProviderIDs = providerIDs
 		}
-		// Build clickable URLs from known providers
-		links := BuildProviderLinks(providerIDs, GetString(m, "Type"))
-		if len(links) > 0 {
-			item["external_urls"] = links
+		if links := BuildProviderLinks(providerIDs, item.Type); len(links) > 0 {
+			item.ExternalURLs = links
 		}
 	}
 
-	// User data
 	if ud := ToMap(m["UserData"]); ud != nil {
-		userData := map[string]any{
-			"played":   GetBool(ud, "Played"),
-			"favorite": GetBool(ud, "IsFavorite"),
+		userData := &UserDataInfo{
+			Played:   GetBool(ud, "Played"),
+			Favorite: GetBool(ud, "IsFavorite"),
 		}
 		if pc := GetInt(ud, "PlayCount"); pc > 0 {
-			userData["play_count"] = pc
+			userData.PlayCount = pc
 		}
 		if pct := GetFloat(ud, "PlayedPercentage"); pct > 0 {
-			userData["played_percentage"] = pct
+			userData.PlayedPercentage = pct
 		}
 		if lp := GetString(ud, "LastPlayedDate"); lp != "" {
-			userData["last_played"] = Truncate(lp, DateOnlyLen)
+			userData.LastPlayed = LocalDate(lp)
 		}
-		item["user_data"] = userData
+		item.UserData = userData
 	}
 
-	// File path
-	if path := GetString(m, "Path"); path != "" {
-		item["file_path"] = path
-	}
-	if fn := GetString(m, "FileName"); fn != "" {
-		item["file_name"] = fn
-	}
+	item.FilePath = GetString(m, "Path")
 
-	// Media sources (codec info, file details, all streams)
-	if sources := ToSlice(m["MediaSources"]); len(sources) > 0 {
-		ms := make([]map[string]any, 0, len(sources))
-		for _, src := range sources {
-			sm := ToMap(src)
-			if sm == nil {
-				continue
-			}
-			source := map[string]any{
-				"container": GetString(sm, "Container"),
-			}
-			if path := GetString(sm, "Path"); path != "" {
-				source["path"] = path
-			}
-			if br := GetInt64(sm, "Bitrate"); br > 0 {
-				source["bitrate_kbps"] = br / UnitsPerKilo
-			}
-			if sz := GetInt64(sm, "Size"); sz > 0 {
-				source["size_mb"] = sz / BytesPerMB
-			}
-
-			// Media streams — capture all audio and subtitle tracks
-			var audioStreams []map[string]any
-			var subtitleStreams []map[string]any
-			if streams := ToSlice(sm["MediaStreams"]); len(streams) > 0 {
-				for _, st := range streams {
-					stm := ToMap(st)
-					if stm == nil {
-						continue
-					}
-					switch GetString(stm, "Type") {
-					case "Video":
-						source["video_codec"] = GetString(stm, "Codec")
-						if w := GetInt(stm, "Width"); w > 0 {
-							source["resolution"] = fmt.Sprintf("%dx%d", w, GetInt(stm, "Height"))
-						}
-						if profile := GetString(stm, "Profile"); profile != "" {
-							source["video_profile"] = profile
-						}
-						if bitDepth := GetInt(stm, "BitDepth"); bitDepth > 0 {
-							source["video_bit_depth"] = bitDepth
-						}
-						if videoRange := GetString(stm, "VideoRange"); videoRange != "" {
-							source["video_range"] = videoRange
-						}
-					case "Audio":
-						audio := map[string]any{
-							"index": GetInt(stm, "Index"),
-							"codec": GetString(stm, "Codec"),
-						}
-						if ch := GetInt(stm, "Channels"); ch > 0 {
-							audio["channels"] = ch
-						}
-						if lang := GetString(stm, "Language"); lang != "" {
-							audio["language"] = lang
-						}
-						if title := GetString(stm, "DisplayTitle"); title != "" {
-							audio["display_title"] = title
-						}
-						if GetBool(stm, "IsDefault") {
-							audio["is_default"] = true
-						}
-						audioStreams = append(audioStreams, audio)
-					case "Subtitle":
-						sub := map[string]any{
-							"index": GetInt(stm, "Index"),
-							"codec": GetString(stm, "Codec"),
-						}
-						if lang := GetString(stm, "Language"); lang != "" {
-							sub["language"] = lang
-						}
-						if title := GetString(stm, "DisplayTitle"); title != "" {
-							sub["display_title"] = title
-						}
-						if GetBool(stm, "IsExternal") {
-							sub["is_external"] = true
-						}
-						if GetBool(stm, "IsDefault") {
-							sub["is_default"] = true
-						}
-						if GetBool(stm, "IsForced") {
-							sub["is_forced"] = true
-						}
-						subtitleStreams = append(subtitleStreams, sub)
-					}
-				}
-			}
-			if len(audioStreams) > 0 {
-				source["audio_streams"] = audioStreams
-			}
-			if len(subtitleStreams) > 0 {
-				source["subtitle_streams"] = subtitleStreams
-			}
-			ms = append(ms, source)
-		}
-		if len(ms) > 0 {
-			item["media_sources"] = ms
+	for _, src := range ToSlice(m["MediaSources"]) {
+		if sm := ToMap(src); sm != nil {
+			item.MediaSources = append(item.MediaSources, mediaSourceFrom(sm))
 		}
 	}
 
-	if al := ToStringSlice(m["Artists"]); len(al) > 0 {
-		item["artists"] = al
-	}
-	if album := GetString(m, "Album"); album != "" {
-		item["album"] = album
-	}
-
-	// TV-specific (series_name already set by ExtractMediaItem)
-	if status := GetString(m, "Status"); status != "" {
-		item["status"] = status
-	}
-
-	// Subtitle/lyric availability
-	if GetBool(m, "HasSubtitles") {
-		item["has_subtitles"] = true
-	}
-	if GetBool(m, "HasLyrics") {
-		item["has_lyrics"] = true
-	}
-
-	// Child count for container items
+	item.Artists = ToStringSlice(m["Artists"])
+	item.Album = GetString(m, "Album")
+	item.Status = GetString(m, "Status")
+	item.HasSubtitles = GetBool(m, "HasSubtitles")
+	item.HasLyrics = GetBool(m, "HasLyrics")
 	if cc := GetInt(m, "ChildCount"); cc > 0 {
-		item["child_count"] = cc
+		item.ChildCount = cc
 	}
 	if ric := GetInt(m, "RecursiveItemCount"); ric > 0 {
-		item["recursive_item_count"] = ric
+		item.RecursiveItemCount = ric
 	}
-
 	return item
 }
 
-func ExtractSessionInfo(s map[string]any) map[string]any {
-	session := map[string]any{
-		"session_id":    GetString(s, "Id"),
-		"user":          GetString(s, "UserName"),
-		"client":        GetString(s, "Client"),
-		"device_name":   GetString(s, "DeviceName"),
-		"last_activity": Truncate(GetString(s, "LastActivityDate"), DateTimeLen),
+// mediaSourceFrom is a raw media source with its video, audio, and subtitle
+// streams. Bitrate is in kbps and size in megabytes, both base 10.
+func mediaSourceFrom(sm map[string]any) MediaSourceInfo {
+	source := MediaSourceInfo{
+		Container: GetString(sm, "Container"),
+		Path:      GetString(sm, "Path"),
 	}
+	if br := GetInt64(sm, "Bitrate"); br > 0 {
+		source.BitrateKbps = br / UnitsPerKilo
+	}
+	if sz := GetInt64(sm, "Size"); sz > 0 {
+		source.SizeMB = sz / BytesPerMB
+	}
+	for _, st := range ToSlice(sm["MediaStreams"]) {
+		stm := ToMap(st)
+		if stm == nil {
+			continue
+		}
+		switch GetString(stm, "Type") {
+		case "Video":
+			source.VideoCodec = GetString(stm, "Codec")
+			if w := GetInt(stm, "Width"); w > 0 {
+				source.Resolution = fmt.Sprintf("%dx%d", w, GetInt(stm, "Height"))
+			}
+			source.VideoProfile = GetString(stm, "Profile")
+			if bitDepth := GetInt(stm, "BitDepth"); bitDepth > 0 {
+				source.VideoBitDepth = bitDepth
+			}
+			source.VideoRange = GetString(stm, "VideoRange")
+			if rangeType := GetString(stm, "VideoRangeType"); rangeType != "Unknown" {
+				source.VideoRangeType = rangeType
+			}
+		case "Audio":
+			audio := AudioStreamInfo{
+				Index:        GetInt(stm, "Index"),
+				Codec:        GetString(stm, "Codec"),
+				Language:     GetString(stm, "Language"),
+				DisplayTitle: GetString(stm, "DisplayTitle"),
+				IsDefault:    GetBool(stm, "IsDefault"),
+			}
+			if ch := GetInt(stm, "Channels"); ch > 0 {
+				audio.Channels = ch
+			}
+			source.AudioStreams = append(source.AudioStreams, audio)
+		case "Subtitle":
+			source.SubtitleStreams = append(source.SubtitleStreams, SubtitleStreamInfo{
+				Index:        GetInt(stm, "Index"),
+				Codec:        GetString(stm, "Codec"),
+				Language:     GetString(stm, "Language"),
+				DisplayTitle: GetString(stm, "DisplayTitle"),
+				IsExternal:   GetBool(stm, "IsExternal"),
+				IsDefault:    GetBool(stm, "IsDefault"),
+				IsForced:     GetBool(stm, "IsForced"),
+			})
+		}
+	}
+	return source
+}
 
+// SessionFrom is a raw Jellyfin session with its status: playing when it is
+// playing an item, otherwise connected.
+func SessionFrom(s map[string]any) SessionInfo {
+	session := SessionInfo{
+		SessionID:    GetString(s, "Id"),
+		User:         GetString(s, "UserName"),
+		Client:       GetString(s, "Client"),
+		DeviceName:   GetString(s, "DeviceName"),
+		LastActivity: LocalDateTime(GetString(s, "LastActivityDate")),
+		Status:       "connected",
+
+		SupportsMediaControl: GetBool(ToMap(s["Capabilities"]), "SupportsMediaControl"),
+	}
 	np := ToMap(s["NowPlayingItem"])
-	if np != nil {
-		nowPlaying := map[string]any{
-			"id":   GetString(np, "Id"),
-			"name": GetString(np, "Name"),
-			"type": GetString(np, "Type"),
-		}
-		if rt := GetInt64(np, "RunTimeTicks"); rt > 0 {
-			nowPlaying["runtime_minutes"] = rt / 600000000
-		}
-		session["now_playing"] = nowPlaying
-
-		ps := ToMap(s["PlayState"])
-		if ps != nil {
-			playState := map[string]any{
-				"is_paused": GetBool(ps, "IsPaused"),
-			}
-			if pos := GetInt64(ps, "PositionTicks"); pos > 0 {
-				playState["position_seconds"] = pos / TicksPerSecond
-				playState["position_ticks"] = pos
-			}
-			if vol := GetInt(ps, "VolumeLevel"); vol > 0 {
-				playState["volume"] = vol
-			}
-			session["play_state"] = playState
-		}
+	if np == nil {
+		return session
 	}
-
+	session.Status = "playing"
+	nowPlaying := &NowPlayingInfo{
+		ID:   GetString(np, "Id"),
+		Name: GetString(np, "Name"),
+		Type: GetString(np, "Type"),
+	}
+	if rt := GetInt64(np, "RunTimeTicks"); rt > 0 {
+		nowPlaying.RuntimeMinutes = rt / TicksPerMinute
+	}
+	session.NowPlaying = nowPlaying
+	if ps := ToMap(s["PlayState"]); ps != nil {
+		playState := &PlayStateInfo{IsPaused: GetBool(ps, "IsPaused")}
+		if pos := GetInt64(ps, "PositionTicks"); pos > 0 {
+			playState.PositionSeconds = pos / TicksPerSecond
+			playState.PositionTicks = pos
+		}
+		if vol := GetInt(ps, "VolumeLevel"); vol > 0 {
+			playState.Volume = vol
+		}
+		session.PlayState = playState
+	}
 	return session
 }
 
-func ExtractLibraries(libs []map[string]any) []map[string]any {
-	items := make([]map[string]any, 0, len(libs))
+// SessionsFrom is SessionFrom over raw sessions. It never returns nil.
+func SessionsFrom(sessions []map[string]any) []SessionInfo {
+	out := make([]SessionInfo, 0, len(sessions))
+	for _, s := range sessions {
+		out = append(out, SessionFrom(s))
+	}
+	return out
+}
+
+// LibrariesFrom is the list of raw virtual folders as libraries. A library
+// with no collection type is mixed. It never returns nil.
+func LibrariesFrom(libs []map[string]any) []LibraryInfo {
+	items := make([]LibraryInfo, 0, len(libs))
 	for _, lib := range libs {
 		ct := GetString(lib, "CollectionType")
 		if ct == "" {
 			ct = "mixed"
 		}
-		item := map[string]any{
-			"name":            GetString(lib, "Name"),
-			"collection_type": ct,
-			"item_id":         GetString(lib, "ItemId"),
-		}
-		if paths := ToStringSlice(lib["Locations"]); len(paths) > 0 {
-			item["paths"] = paths
-		}
-		items = append(items, item)
+		items = append(items, LibraryInfo{
+			Name:           GetString(lib, "Name"),
+			CollectionType: ct,
+			ItemID:         GetString(lib, "ItemId"),
+			Paths:          ToStringSlice(lib["Locations"]),
+		})
 	}
 	return items
 }
@@ -366,20 +361,20 @@ func ExtractUserSummary(u map[string]any) map[string]any {
 		}
 	}
 	if la := GetString(u, "LastActivityDate"); la != "" {
-		user["last_activity"] = Truncate(la, DateTimeLen)
+		user["last_activity"] = LocalDateTime(la)
 	}
 	if ll := GetString(u, "LastLoginDate"); ll != "" {
-		user["last_login"] = Truncate(ll, DateTimeLen)
+		user["last_login"] = LocalDateTime(ll)
 	}
 	return user
 }
 
+// ExtractDetailedUser adds the user's policy and configuration to
+// ExtractUserSummary. It omits HasPassword, which Jellyfin 12 always reports
+// as true, so the field cannot be reported truthfully across the supported
+// servers.
 func ExtractDetailedUser(u map[string]any) map[string]any {
 	user := ExtractUserSummary(u)
-
-	if GetBool(u, "HasPassword") {
-		user["has_password"] = true
-	}
 
 	if policy := ToMap(u["Policy"]); policy != nil {
 		// Library access
@@ -448,6 +443,17 @@ func ExtractDetailedUser(u map[string]any) map[string]any {
 	return user
 }
 
-func ExtractItemList(result map[string]any) []map[string]any {
-	return MapExtract(ToSlice(result["Items"]), ExtractMediaItem)
+// clockTime formats a position in ticks as hours, minutes, and seconds, such
+// as 1:02:03.
+func clockTime(ticks int64) string {
+	sec := ticks / TicksPerSecond
+	return fmt.Sprintf("%d:%02d:%02d", sec/3600, sec/60%60, sec%60)
+}
+
+// nonNil returns an empty slice in place of nil, so the field serializes as [].
+func nonNil(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
 }

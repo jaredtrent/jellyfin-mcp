@@ -18,7 +18,7 @@ func RegisterResources(server *mcp.Server, client jf.Client) {
 		URI:         "jellyfin://server/info",
 		Name:        "Jellyfin Server Info",
 		Title:       "Server Info",
-		Description: "Server name, version, OS, and network details",
+		Description: "Server name, version, ID, whether the startup wizard is complete, and the local address",
 		MIMEType:    "application/json",
 		Annotations: &mcp.Annotations{Audience: []mcp.Role{"assistant"}, Priority: 0.3},
 	}, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
@@ -29,7 +29,6 @@ func RegisterResources(server *mcp.Server, client jf.Client) {
 		result := map[string]any{
 			"server_name":              jf.GetString(info, "ServerName"),
 			"version":                  jf.GetString(info, "Version"),
-			"os":                       jf.GetString(info, "OperatingSystem"),
 			"id":                       jf.GetString(info, "Id"),
 			"startup_wizard_completed": jf.GetBool(info, "StartupWizardCompleted"),
 		}
@@ -58,7 +57,7 @@ func RegisterResources(server *mcp.Server, client jf.Client) {
 		if err := client.Get(ctx, "/Library/VirtualFolders", nil, &libs); err != nil {
 			return nil, fmt.Errorf("failed to get libraries: %w", err)
 		}
-		items := jf.ExtractLibraries(libs)
+		items := jf.LibrariesFrom(libs)
 		return &mcp.ReadResourceResult{
 			Contents: []*mcp.ResourceContents{{
 				URI:      "jellyfin://libraries",
@@ -81,10 +80,10 @@ func RegisterResources(server *mcp.Server, client jf.Client) {
 		if err := client.Get(ctx, "/Sessions", nil, &sessions); err != nil {
 			return nil, fmt.Errorf("failed to get sessions: %w", err)
 		}
-		items := make([]map[string]any, 0, len(sessions))
+		items := make([]jf.SessionInfo, 0, len(sessions))
 		for _, s := range sessions {
 			if jf.ToMap(s["NowPlayingItem"]) != nil {
-				items = append(items, jf.ExtractSessionInfo(s))
+				items = append(items, jf.SessionFrom(s))
 			}
 		}
 		return &mcp.ReadResourceResult{
@@ -101,7 +100,7 @@ func RegisterResources(server *mcp.Server, client jf.Client) {
 		URI:         "jellyfin://resume",
 		Name:        "Resume Watching",
 		Title:       "Resume",
-		Description: "Items with in-progress playback that can be continued",
+		Description: "Up to 15 items with in-progress playback that can be continued",
 		MIMEType:    "application/json",
 		Annotations: &mcp.Annotations{Audience: []mcp.Role{"assistant"}, Priority: 0.6},
 	}, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
@@ -109,20 +108,18 @@ func RegisterResources(server *mcp.Server, client jf.Client) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to get user ID: %w", err)
 		}
+		// /UserItems/Resume lists what the user is partway through, most
+		// recently played first, leaving out what a session is playing now.
 		params := url.Values{
-			"Limit":     {"15"},
-			"Recursive": {"true"},
-			"Filters":   {"IsResumable"},
-			"SortBy":    {"DatePlayed"},
-			"SortOrder": {"Descending"},
-			"Fields":    {"Overview,ProductionYear,CommunityRating"},
+			"UserId": {userID},
+			"Limit":  {"15"},
+			"Fields": {"Overview"},
 		}
 		var result map[string]any
-		endpoint := fmt.Sprintf("/Users/%s/Items", jf.SanitizeID(userID))
-		if err := client.Get(ctx, endpoint, params, &result); err != nil {
+		if err := client.Get(ctx, "/UserItems/Resume", params, &result); err != nil {
 			return nil, fmt.Errorf("failed to get resumable items: %w", err)
 		}
-		items := jf.ExtractItemList(result)
+		items := jf.ItemsFrom(result)
 		return &mcp.ReadResourceResult{
 			Contents: []*mcp.ResourceContents{{
 				URI:      "jellyfin://resume",
@@ -137,7 +134,7 @@ func RegisterResources(server *mcp.Server, client jf.Client) {
 		URI:         "jellyfin://next-up",
 		Name:        "Next Up",
 		Title:       "Next Up",
-		Description: "Next episodes to watch in series that are in progress",
+		Description: "Up to 20 next episodes to watch in series that are in progress",
 		MIMEType:    "application/json",
 		Annotations: &mcp.Annotations{Audience: []mcp.Role{"assistant"}, Priority: 0.6},
 	}, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
@@ -148,13 +145,13 @@ func RegisterResources(server *mcp.Server, client jf.Client) {
 		params := url.Values{
 			"Limit":  {"20"},
 			"UserId": {userID},
-			"Fields": {"Overview,ProductionYear,CommunityRating"},
+			"Fields": {"Overview"},
 		}
 		var result map[string]any
 		if err := client.Get(ctx, "/Shows/NextUp", params, &result); err != nil {
 			return nil, fmt.Errorf("failed to get next up: %w", err)
 		}
-		items := jf.ExtractItemList(result)
+		items := jf.ItemsFrom(result)
 		return &mcp.ReadResourceResult{
 			Contents: []*mcp.ResourceContents{{
 				URI:      "jellyfin://next-up",
@@ -169,7 +166,7 @@ func RegisterResources(server *mcp.Server, client jf.Client) {
 		URI:         "jellyfin://favorites",
 		Name:        "Favorites",
 		Title:       "Favorites",
-		Description: "Items marked as favorite by the current user",
+		Description: "Up to 50 items marked as favorite by the current user",
 		MIMEType:    "application/json",
 		Annotations: &mcp.Annotations{Audience: []mcp.Role{"assistant"}, Priority: 0.5},
 	}, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
@@ -178,19 +175,19 @@ func RegisterResources(server *mcp.Server, client jf.Client) {
 			return nil, fmt.Errorf("failed to get user ID: %w", err)
 		}
 		params := url.Values{
+			"UserId":     {userID},
 			"Limit":      {"50"},
 			"Recursive":  {"true"},
 			"IsFavorite": {"true"},
 			"SortBy":     {"SortName"},
 			"SortOrder":  {"Ascending"},
-			"Fields":     {"Overview,ProductionYear,CommunityRating"},
+			"Fields":     {"Overview"},
 		}
 		var result map[string]any
-		endpoint := fmt.Sprintf("/Users/%s/Items", jf.SanitizeID(userID))
-		if err := client.Get(ctx, endpoint, params, &result); err != nil {
+		if err := client.Get(ctx, "/Items", params, &result); err != nil {
 			return nil, fmt.Errorf("failed to get favorites: %w", err)
 		}
-		items := jf.ExtractItemList(result)
+		items := jf.ItemsFrom(result)
 		return &mcp.ReadResourceResult{
 			Contents: []*mcp.ResourceContents{{
 				URI:      "jellyfin://favorites",
@@ -205,26 +202,13 @@ func RegisterResources(server *mcp.Server, client jf.Client) {
 		URI:         "jellyfin://latest",
 		Name:        "Recently Added",
 		Title:       "Latest",
-		Description: "Recently added items across all libraries",
+		Description: "Up to 20 recently added items across all libraries",
 		MIMEType:    "application/json",
 		Annotations: &mcp.Annotations{Audience: []mcp.Role{"assistant"}, Priority: 0.5},
 	}, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
-		userID, err := client.GetUserID(ctx)
+		items, err := jf.FetchLatest(ctx, client, "", jf.LatestItemsLimit)
 		if err != nil {
-			return nil, fmt.Errorf("failed to get user ID: %w", err)
-		}
-		params := url.Values{
-			"Limit":  {"20"},
-			"UserId": {userID},
-			"Fields": {"Overview,ProductionYear,CommunityRating"},
-		}
-		var result []map[string]any
-		if err := client.Get(ctx, "/Items/Latest", params, &result); err != nil {
 			return nil, fmt.Errorf("failed to get latest items: %w", err)
-		}
-		items := make([]map[string]any, 0, len(result))
-		for _, raw := range result {
-			items = append(items, jf.ExtractMediaItem(raw))
 		}
 		return &mcp.ReadResourceResult{
 			Contents: []*mcp.ResourceContents{{
@@ -240,7 +224,7 @@ func RegisterResources(server *mcp.Server, client jf.Client) {
 		URI:         "jellyfin://recently-played",
 		Name:        "Recently Played",
 		Title:       "Recently Played",
-		Description: "Items recently watched or listened to (verified playback only), sorted by play date",
+		Description: "Up to 25 items recently watched or listened to, newest first. It lists only playback verified in the activity log, so items marked played by hand are left out",
 		MIMEType:    "application/json",
 		Annotations: &mcp.Annotations{Audience: []mcp.Role{"assistant"}, Priority: 0.5},
 	}, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
@@ -249,50 +233,34 @@ func RegisterResources(server *mcp.Server, client jf.Client) {
 			return nil, fmt.Errorf("failed to get user ID: %w", err)
 		}
 
-		// Build set of item IDs with actual playback events from activity log
-		playedViaPlayback := map[string]bool{}
-		logItems, _, logErr := jf.FetchAllPages(ctx, client, "/System/ActivityLog/Entries", url.Values{}, 2000)
-		if logErr == nil {
-			for _, raw := range logItems {
-				m := jf.ToMap(raw)
-				if jf.GetString(m, "Type") != "VideoPlaybackStopped" {
-					continue
-				}
-				if jf.GetString(m, "UserId") != userID {
-					continue
-				}
-				if itemID := jf.GetString(m, "ItemId"); itemID != "" {
-					playedViaPlayback[itemID] = true
-				}
-			}
+		playedViaPlayback, err := jf.PlayedItemIDs(ctx, client, userID)
+		if err != nil {
+			return nil, err
 		}
 
 		params := url.Values{
+			"UserId":    {userID},
 			"Limit":     {"100"},
 			"Recursive": {"true"},
 			"IsPlayed":  {"true"},
 			"SortBy":    {"DatePlayed"},
 			"SortOrder": {"Descending"},
-			"Fields":    {"Overview,ProductionYear,CommunityRating,UserData"},
+			"Fields":    {"Overview"},
 		}
 		var result map[string]any
-		endpoint := fmt.Sprintf("/Users/%s/Items", jf.SanitizeID(userID))
-		if err := client.Get(ctx, endpoint, params, &result); err != nil {
+		if err := client.Get(ctx, "/Items", params, &result); err != nil {
 			return nil, fmt.Errorf("failed to get recently played: %w", err)
 		}
 		rawItems := jf.ToSlice(result["Items"])
-		items := make([]map[string]any, 0, len(rawItems))
+		items := make([]jf.MediaItem, 0, len(rawItems))
 		for _, raw := range rawItems {
 			m := jf.ToMap(raw)
-			item := jf.ExtractMediaItem(m)
-			id, _ := item["id"].(string)
-			if !playedViaPlayback[id] {
+			item := jf.MediaItemFrom(m)
+			if !playedViaPlayback[jf.NormalizeID(item.ID)] {
 				continue
 			}
-			if ud := jf.ToMap(m["UserData"]); ud != nil {
-				if lp := jf.GetString(ud, "LastPlayedDate"); lp != "" {
-					item["last_played"] = jf.Truncate(lp, jf.DateOnlyLen)
-				}
+			if lp := jf.LastPlayedOf(m); lp != "" {
+				item.LastPlayed = jf.LocalDate(lp)
 			}
 			items = append(items, item)
 			if len(items) >= 25 {
@@ -321,16 +289,7 @@ func RegisterResources(server *mcp.Server, client jf.Client) {
 		if err := client.Get(ctx, "/Sessions", nil, &sessions); err != nil {
 			return nil, fmt.Errorf("failed to get sessions: %w", err)
 		}
-		items := make([]map[string]any, 0, len(sessions))
-		for _, s := range sessions {
-			info := jf.ExtractSessionInfo(s)
-			if jf.ToMap(s["NowPlayingItem"]) != nil {
-				info["status"] = "playing"
-			} else {
-				info["status"] = "connected"
-			}
-			items = append(items, info)
-		}
+		items := jf.SessionsFrom(sessions)
 		return &mcp.ReadResourceResult{
 			Contents: []*mcp.ResourceContents{{
 				URI:      "jellyfin://sessions",
@@ -374,7 +333,7 @@ func RegisterResources(server *mcp.Server, client jf.Client) {
 		URITemplate: "jellyfin://items/{itemId}",
 		Name:        "Media Item",
 		Title:       "Media Item",
-		Description: "Detailed metadata for any media item by its Jellyfin ID",
+		Description: "Detailed metadata for any media item. itemId is the item's Jellyfin ID from search or browse results",
 		MIMEType:    "application/json",
 		Annotations: &mcp.Annotations{Audience: []mcp.Role{"assistant"}, Priority: 0.7},
 	}, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
@@ -386,12 +345,10 @@ func RegisterResources(server *mcp.Server, client jf.Client) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to get user ID: %w", err)
 		}
-		var result map[string]any
-		endpoint := fmt.Sprintf("/Users/%s/Items/%s", jf.SanitizeID(userID), jf.SanitizeID(itemID))
-		if err := client.Get(ctx, endpoint, nil, &result); err != nil {
+		item, err := jf.FetchItemDetails(ctx, client, itemID, userID)
+		if err != nil {
 			return nil, fmt.Errorf("failed to get item: %w", err)
 		}
-		item := jf.ExtractDetailedItem(result)
 		return &mcp.ReadResourceResult{
 			Contents: []*mcp.ResourceContents{{
 				URI:      req.Params.URI,
@@ -406,7 +363,7 @@ func RegisterResources(server *mcp.Server, client jf.Client) {
 		URITemplate: "jellyfin://users/{userId}",
 		Name:        "User Profile",
 		Title:       "User Profile",
-		Description: "User account details and policy settings",
+		Description: "User account details and policy settings. userId is a user ID from jellyfin_users action=list, not a username",
 		MIMEType:    "application/json",
 		Annotations: &mcp.Annotations{Audience: []mcp.Role{"assistant"}, Priority: 0.5},
 	}, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
@@ -433,7 +390,7 @@ func RegisterResources(server *mcp.Server, client jf.Client) {
 		URITemplate: "jellyfin://libraries/{libraryId}/latest",
 		Name:        "Library Latest",
 		Title:       "Library Latest",
-		Description: "Recently added items in a specific library",
+		Description: "Up to 20 recently added items in a specific library. libraryId is the library's item_id from jellyfin_libraries",
 		MIMEType:    "application/json",
 		Annotations: &mcp.Annotations{Audience: []mcp.Role{"assistant"}, Priority: 0.5},
 	}, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
@@ -442,23 +399,9 @@ func RegisterResources(server *mcp.Server, client jf.Client) {
 		if libraryID == "" {
 			return nil, fmt.Errorf("library ID is required in URI")
 		}
-		userID, err := client.GetUserID(ctx)
+		items, err := jf.FetchLatest(ctx, client, libraryID, jf.LatestItemsLimit)
 		if err != nil {
-			return nil, fmt.Errorf("failed to get user ID: %w", err)
-		}
-		params := url.Values{
-			"Limit":    {"20"},
-			"UserId":   {userID},
-			"ParentId": {jf.SanitizeID(libraryID)},
-			"Fields":   {"Overview,ProductionYear,CommunityRating"},
-		}
-		var result []map[string]any
-		if err := client.Get(ctx, "/Items/Latest", params, &result); err != nil {
 			return nil, fmt.Errorf("failed to get library latest: %w", err)
-		}
-		items := make([]map[string]any, 0, len(result))
-		for _, raw := range result {
-			items = append(items, jf.ExtractMediaItem(raw))
 		}
 		return &mcp.ReadResourceResult{
 			Contents: []*mcp.ResourceContents{{

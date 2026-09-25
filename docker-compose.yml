@@ -4,6 +4,8 @@
 #        JELLYFIN_URL=https://jellyfin_host:8920
 #        JELLYFIN_API_KEY=your_api_key
 #        HTTP_TOKEN=a_long_random_secret
+#        TZ=America/New_York
+#      TZ is optional: the time zone for "today" and the dates in tool results.
 #   2. docker compose up -d
 #
 # The MCP endpoint is then at http://127.0.0.1:8080/mcp (send
@@ -26,14 +28,16 @@ services:
     environment:
       JELLYFIN_URL: "${JELLYFIN_URL:?set JELLYFIN_URL in .env}"
       JELLYFIN_API_KEY: "${JELLYFIN_API_KEY:?set JELLYFIN_API_KEY in .env}"
-      # JELLYFIN_USER_ID: "${JELLYFIN_USER_ID:-}"  # optional — auto-detected
+      # JELLYFIN_USER_ID: "${JELLYFIN_USER_ID:-}"  # optional: a user ID or username; defaults to the first administrator
+      TZ: "${TZ:-UTC}"
+      # The token is passed through the environment, not the command line, so
+      # it does not show in the process list or in `docker inspect` arguments.
+      HTTP_TOKEN: "${HTTP_TOKEN:?set HTTP_TOKEN in .env}"
     command:
       - "--http"
       - "--addr"
       - "0.0.0.0:8080"
-      - "--http-token"
-      - "${HTTP_TOKEN:?set HTTP_TOKEN in .env}"
-    # Hardening — the server is a single static binary that writes nothing to disk.
+    # Hardening: the server is a single static binary that writes nothing to disk.
     read_only: true
     tmpfs:
       - /tmp
@@ -41,7 +45,10 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
-    mem_limit: 256m
+    # Two 20 MiB uploads may be in flight at once, each held as its inbound
+    # message while its body streams to Jellyfin; together they peak near
+    # 500 MiB, and a 256m limit is OOM-killed under that load.
+    mem_limit: 512m
     cpus: 0.5
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]

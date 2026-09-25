@@ -3,10 +3,10 @@ package server
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"log"
-	"net/url"
-	"sync/atomic"
+	"sync"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -21,25 +21,59 @@ var subscribableURIs = map[string]bool{
 	"jellyfin://recently-played":      true,
 }
 
+// subscriptionTracker records which sessions subscribe to which resources, so
+// the poller reads Jellyfin only for resources a session is watching. A
+// session's subscriptions end when the session does, including one whose
+// client goes away without unsubscribing. The HTTP session of a client on a
+// protocol before statelessProtocolVersion ends when the client closes it or
+// after the handler's SessionTimeout without a request, not when its
+// connection drops.
 type subscriptionTracker struct {
-	count atomic.Int64
+	mu       sync.Mutex
+	sessions map[*mcp.ServerSession]map[string]bool
 }
 
-func (t *subscriptionTracker) increment() { t.count.Add(1) }
+// subscribe records that ss watches uri. The first subscription of a session
+// starts a wait for the session's end, which releases all of them.
+func (t *subscriptionTracker) subscribe(ss *mcp.ServerSession, uri string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.sessions == nil {
+		t.sessions = make(map[*mcp.ServerSession]map[string]bool)
+	}
+	uris, known := t.sessions[ss]
+	if !known {
+		uris = make(map[string]bool)
+		t.sessions[ss] = uris
+		go func() {
+			_ = ss.Wait()
+			t.mu.Lock()
+			defer t.mu.Unlock()
+			delete(t.sessions, ss)
+		}()
+	}
+	uris[uri] = true
+}
 
-func (t *subscriptionTracker) decrement() {
-	for {
-		old := t.count.Load()
-		if old <= 0 {
-			return
-		}
-		if t.count.CompareAndSwap(old, old-1) {
-			return
+func (t *subscriptionTracker) unsubscribe(ss *mcp.ServerSession, uri string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.sessions[ss], uri)
+}
+
+// watched reports whether any session subscribes to any of uris.
+func (t *subscriptionTracker) watched(uris ...string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, subscribed := range t.sessions {
+		for _, uri := range uris {
+			if subscribed[uri] {
+				return true
+			}
 		}
 	}
+	return false
 }
-
-func (t *subscriptionTracker) active() bool { return t.count.Load() > 0 }
 
 func subscribeHandler(tracker *subscriptionTracker) func(context.Context, *mcp.SubscribeRequest) error {
 	return func(_ context.Context, req *mcp.SubscribeRequest) error {
@@ -47,7 +81,7 @@ func subscribeHandler(tracker *subscriptionTracker) func(context.Context, *mcp.S
 		if !subscribableURIs[uri] {
 			return fmt.Errorf("resource %q does not support subscriptions", uri)
 		}
-		tracker.increment()
+		tracker.subscribe(req.Session, uri)
 		return nil
 	}
 }
@@ -58,115 +92,116 @@ func unsubscribeHandler(tracker *subscriptionTracker) func(context.Context, *mcp
 		if !subscribableURIs[uri] {
 			return fmt.Errorf("resource %q does not support subscriptions", uri)
 		}
-		tracker.decrement()
+		tracker.unsubscribe(req.Session, uri)
 		return nil
 	}
 }
 
-func startResourcePoller(ctx context.Context, server *mcp.Server, client jf.Client, tracker *subscriptionTracker) {
-	const (
-		sessionInterval = 10 * time.Second
-		contentInterval = 60 * time.Second
-	)
+// resourceWatch notices changes to one group of subscribable resources by
+// hashing what Jellyfin returns for them.
+type resourceWatch struct {
+	uris   []string // the resources fetch reads; each is notified on a change
+	fetch  func(context.Context) ([]byte, error)
+	last   [sha256.Size]byte
+	seeded bool
+}
+
+// poll reads the group while a session watches one of its resources, and
+// notifies the subscribers when the content changed since the previous poll.
+// The first poll after the group becomes watched sets the baseline and
+// notifies nothing.
+func (w *resourceWatch) poll(ctx context.Context, server *mcp.Server, tracker *subscriptionTracker) {
+	if !tracker.watched(w.uris...) {
+		w.seeded = false
+		return
+	}
+	data, err := w.fetch(ctx)
+	if err != nil {
+		log.Printf("poll %s: %v", w.uris[0], err)
+		return
+	}
+	hash := sha256.Sum256(data)
+	changed := w.seeded && hash != w.last
+	w.last, w.seeded = hash, true
+	if !changed {
+		return
+	}
+	for _, uri := range w.uris {
+		if err := server.ResourceUpdated(ctx, &mcp.ResourceUpdatedNotificationParams{URI: uri}); err != nil {
+			log.Printf("ResourceUpdated(%s): %v", uri, err)
+		}
+	}
+}
+
+// resourceWatches are the poller's groups: sessions, polled often, and the
+// two content groups, polled less often.
+type resourceWatches struct {
+	sessions, latest, played *resourceWatch
+}
+
+func newResourceWatches(client jf.Client) resourceWatches {
+	return resourceWatches{
+		sessions: &resourceWatch{
+			uris: []string{"jellyfin://sessions", "jellyfin://sessions/now-playing"},
+			fetch: func(ctx context.Context) ([]byte, error) {
+				return client.DoRequest(ctx, "GET", "/Sessions", nil, nil)
+			},
+		},
+		latest: &resourceWatch{
+			uris: []string{"jellyfin://latest"},
+			fetch: func(ctx context.Context) ([]byte, error) {
+				items, err := jf.FetchLatest(ctx, client, "", jf.LatestItemsLimit)
+				if err != nil {
+					return nil, err
+				}
+				return json.Marshal(items)
+			},
+		},
+		played: &resourceWatch{
+			uris: []string{"jellyfin://recently-played"},
+			fetch: func(ctx context.Context) ([]byte, error) {
+				userID, err := client.GetUserID(ctx)
+				if err != nil {
+					return nil, err
+				}
+				// A change shows among the newest entries, so the watch
+				// examines only those.
+				found, err := jf.QueryActivity(ctx, client, jf.ActivityQuery{Type: "PlaybackStopped", UserID: userID, Limit: 25, Lookback: 200})
+				if err != nil {
+					return nil, err
+				}
+				return json.Marshal(found.Entries)
+			},
+		},
+	}
+}
+
+// How often the poller reads each group: sessions change by the second, and
+// library content changes slowly.
+const (
+	sessionPollInterval = 10 * time.Second
+	contentPollInterval = 60 * time.Second
+)
+
+// startResourcePoller polls the sessions group every sessionInterval and the
+// content groups every contentInterval, until ctx ends.
+func startResourcePoller(ctx context.Context, server *mcp.Server, client jf.Client, tracker *subscriptionTracker, sessionInterval, contentInterval time.Duration) {
+	watches := newResourceWatches(client)
 
 	go func() {
 		sessionTicker := time.NewTicker(sessionInterval)
 		contentTicker := time.NewTicker(contentInterval)
 		defer sessionTicker.Stop()
 		defer contentTicker.Stop()
-
-		var (
-			lastSessionHash [sha256.Size]byte
-			lastLatestHash  [sha256.Size]byte
-			lastPlayedHash  [sha256.Size]byte
-			seededSession   bool
-			seededLatest    bool
-			seededPlayed    bool
-		)
-
-		pollSessions := func() {
-			if !tracker.active() {
-				return
-			}
-			data, err := client.DoRequest(ctx, "GET", "/Sessions", nil, nil)
-			if err != nil {
-				log.Printf("poll sessions: %v", err)
-				return
-			}
-			hash := sha256.Sum256(data)
-			changed := hash != lastSessionHash
-			lastSessionHash = hash
-			if !seededSession {
-				seededSession = true
-				return
-			}
-			if changed {
-				if err := server.ResourceUpdated(ctx, &mcp.ResourceUpdatedNotificationParams{URI: "jellyfin://sessions"}); err != nil {
-					log.Printf("ResourceUpdated(sessions): %v", err)
-				}
-				if err := server.ResourceUpdated(ctx, &mcp.ResourceUpdatedNotificationParams{URI: "jellyfin://sessions/now-playing"}); err != nil {
-					log.Printf("ResourceUpdated(sessions/now-playing): %v", err)
-				}
-			}
-		}
-
-		pollLatest := func() {
-			if !tracker.active() {
-				return
-			}
-			params := url.Values{"Limit": {"20"}}
-			data, err := client.DoRequest(ctx, "GET", "/Items/Latest", params, nil)
-			if err != nil {
-				log.Printf("poll latest: %v", err)
-				return
-			}
-			hash := sha256.Sum256(data)
-			changed := hash != lastLatestHash
-			lastLatestHash = hash
-			if !seededLatest {
-				seededLatest = true
-				return
-			}
-			if changed {
-				if err := server.ResourceUpdated(ctx, &mcp.ResourceUpdatedNotificationParams{URI: "jellyfin://latest"}); err != nil {
-					log.Printf("ResourceUpdated(latest): %v", err)
-				}
-			}
-		}
-
-		pollRecentlyPlayed := func() {
-			if !tracker.active() {
-				return
-			}
-			params := url.Values{"Limit": {"25"}, "Type": {"VideoPlaybackStopped"}}
-			data, err := client.DoRequest(ctx, "GET", "/System/ActivityLog/Entries", params, nil)
-			if err != nil {
-				log.Printf("poll recently-played: %v", err)
-				return
-			}
-			hash := sha256.Sum256(data)
-			changed := hash != lastPlayedHash
-			lastPlayedHash = hash
-			if !seededPlayed {
-				seededPlayed = true
-				return
-			}
-			if changed {
-				if err := server.ResourceUpdated(ctx, &mcp.ResourceUpdatedNotificationParams{URI: "jellyfin://recently-played"}); err != nil {
-					log.Printf("ResourceUpdated(recently-played): %v", err)
-				}
-			}
-		}
-
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-sessionTicker.C:
-				pollSessions()
+				watches.sessions.poll(ctx, server, tracker)
 			case <-contentTicker.C:
-				pollLatest()
-				pollRecentlyPlayed()
+				watches.latest.poll(ctx, server, tracker)
+				watches.played.poll(ctx, server, tracker)
 			}
 		}
 	}()

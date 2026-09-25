@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # ---------- build stage ----------
-FROM golang:1.26.4-alpine AS build
+FROM golang:1.27.1-alpine AS build
 
 # Never silently fetch a different toolchain than the image ships (reproducibility).
 ENV GOTOOLCHAIN=local
@@ -19,10 +19,11 @@ RUN CGO_ENABLED=0 go build -trimpath \
       -o /out/jellyfin-mcp .
 
 # ---------- runtime stage ----------
-FROM alpine:3.23
+FROM alpine:3.24
 
 # ca-certificates: required for HTTPS connections to your Jellyfin server.
-RUN apk add --no-cache ca-certificates \
+# tzdata: lets TZ set the time zone the server gives "today" and reads dates in.
+RUN apk add --no-cache ca-certificates tzdata \
  && addgroup -S jellyfin \
  && adduser -S -G jellyfin jellyfin
 
@@ -44,7 +45,7 @@ USER jellyfin
 EXPOSE 8080
 
 # Liveness probe: /health needs no auth and only reports that the HTTP listener is
-# up (it does not check Jellyfin connectivity). Valid only in HTTP mode — for stdio
+# up (it does not check Jellyfin connectivity). Valid only in HTTP mode; for stdio
 # runs, start the container with `--no-healthcheck`.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD wget -qO- http://127.0.0.1:8080/health >/dev/null 2>&1 || exit 1

@@ -26,10 +26,10 @@ func main() {
 	flags := rootCmd.Flags()
 	flags.StringVar(&cfg.Toolsets, "toolsets", "", "comma-separated toolset groups to enable (default: all)")
 	flags.BoolVar(&cfg.ReadOnly, "read-only", false, "only register read-only tools (no writes, deletes, or mutations)")
-	flags.BoolVar(&cfg.DisableDestructive, "disable-destructive", false, "skip destructive tools (delete, restart, shutdown) while allowing other writes")
+	flags.BoolVar(&cfg.DisableDestructive, "disable-destructive", false, "refuse destructive actions (deletes, removals, restores, uninstalls, restarts, shutdowns, revocations, cancellations, version merges and splits, and password, policy, trigger, and whole-configuration changes) while allowing other writes")
 	flags.BoolVar(&cfg.HTTPMode, "http", false, "run as HTTP server instead of stdio")
 	flags.StringVar(&cfg.HTTPAddr, "addr", "127.0.0.1:8080", "HTTP listen address (only used with --http)")
-	flags.StringVar(&cfg.HTTPToken, "http-token", "", "bearer token for HTTP authentication (only used with --http)")
+	flags.StringVar(&cfg.HTTPToken, "http-token", os.Getenv("HTTP_TOKEN"), "bearer token for HTTP authentication (only used with --http; defaults to the HTTP_TOKEN environment variable, which keeps the token out of the process list)")
 
 	rootCmd.SetUsageTemplate(usageTemplate())
 
@@ -47,7 +47,9 @@ func usageTemplate() string {
 Environment variables:
   JELLYFIN_URL        Server URL (default: https://jellyfin_host:8920)
   JELLYFIN_API_KEY    API key (required)
-  JELLYFIN_USER_ID    User ID (optional, auto-detected if not set)
+  JELLYFIN_USER_ID    User ID or username (optional; defaults to the first administrator)
+  HTTP_TOKEN          Bearer token for --http (or pass --http-token)
+  TZ                  Time zone for today's date and for dates in tool inputs and results
 
 Flags:
 {{.LocalFlags.FlagUsages | trimTrailingWhitespaces}}

@@ -8,8 +8,8 @@ const (
 
 // Size and rate unit divisors.
 const (
-	UnitsPerKilo int64 = 1_000 // base-10 kilo divisor (bytes→KB, bps→kbps)
-	BytesPerMB   int64 = 1_048_576
+	UnitsPerKilo int64 = 1_000     // base-10 kilo divisor (bytes→KB, bps→kbps)
+	BytesPerMB   int64 = 1_000_000 // base-10, so a size_mb field is megabytes as labeled
 	BytesPerGB   int64 = 1_073_741_824
 )
 
@@ -61,8 +61,19 @@ const (
 // BackupStaleDays is how old a backup can be before health_check warns.
 const BackupStaleDays = 7
 
-// HealthCheckMaxIssues caps the number of recent log issues shown in health_check.
+// HealthCheckMaxIssues caps how many recent errors, and separately how many
+// recent warnings, health_check shows.
 const HealthCheckMaxIssues = 5
+
+// log_file limits. A result holds at most LogFileMaxEntries entries and about
+// LogFileMaxChars characters, which an MCP client can show in full; each run
+// of stack frames in an entry keeps its first LogFileStackFrames frames.
+const (
+	LogFileDefaultEntries = 100
+	LogFileMaxEntries     = 500
+	LogFileMaxChars       = 48_000
+	LogFileStackFrames    = 3
+)
 
 // MaxResponseBodyBytes caps the amount of data read from a single Jellyfin API
 // response to prevent unbounded memory allocation (50 MB).

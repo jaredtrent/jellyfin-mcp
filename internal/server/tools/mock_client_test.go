@@ -3,6 +3,7 @@ package tools_test
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/url"
 
 	jf "github.com/jaredtrent/jellyfin-mcp/internal/jellyfin"
@@ -13,16 +14,17 @@ var _ jf.Client = (*mockClient)(nil)
 
 // mockClient implements jf.Client with configurable function fields.
 type mockClient struct {
-	getFunc           func(ctx context.Context, endpoint string, params url.Values, dest any) error
-	getRawFunc        func(ctx context.Context, endpoint string, params url.Values) (string, error)
-	postFunc          func(ctx context.Context, endpoint string, params url.Values, reqBody any, dest any) error
-	postNoContentFunc func(ctx context.Context, endpoint string, params url.Values, reqBody any) error
-	postRawFunc       func(ctx context.Context, endpoint string, params url.Values, body []byte, contentType string) error
-	delFunc           func(ctx context.Context, endpoint string, params url.Values) error
-	doRequestFunc     func(ctx context.Context, method, endpoint string, params url.Values, body any) ([]byte, error)
-	getUserIDFunc     func(ctx context.Context) (string, error)
-	baseURLVal        string
-	apiKeyVal         string
+	getFunc            func(ctx context.Context, endpoint string, params url.Values, dest any) error
+	getRawFunc         func(ctx context.Context, endpoint string, params url.Values) (string, error)
+	postFunc           func(ctx context.Context, endpoint string, params url.Values, reqBody any, dest any) error
+	postNoContentFunc  func(ctx context.Context, endpoint string, params url.Values, reqBody any) error
+	postRawFunc        func(ctx context.Context, endpoint string, params url.Values, body io.Reader, size int64, contentType string) error
+	delFunc            func(ctx context.Context, endpoint string, params url.Values) error
+	doRequestFunc      func(ctx context.Context, method, endpoint string, params url.Values, body any) ([]byte, error)
+	getUserIDFunc      func(ctx context.Context) (string, error)
+	serverVersion      string // defaults to 12.1.0
+	disableDestructive bool   // the test server runs with --disable-destructive
+	baseURLVal         string
 }
 
 func (m *mockClient) Get(ctx context.Context, endpoint string, params url.Values, dest any) error {
@@ -53,9 +55,9 @@ func (m *mockClient) PostNoContent(ctx context.Context, endpoint string, params 
 	return nil
 }
 
-func (m *mockClient) PostRaw(ctx context.Context, endpoint string, params url.Values, body []byte, contentType string) error {
+func (m *mockClient) PostRaw(ctx context.Context, endpoint string, params url.Values, body io.Reader, size int64, contentType string) error {
 	if m.postRawFunc != nil {
-		return m.postRawFunc(ctx, endpoint, params, body, contentType)
+		return m.postRawFunc(ctx, endpoint, params, body, size, contentType)
 	}
 	return nil
 }
@@ -81,18 +83,18 @@ func (m *mockClient) GetUserID(ctx context.Context) (string, error) {
 	return "test-user-id", nil
 }
 
+func (m *mockClient) ServerVersion(context.Context) (jf.ServerVersion, error) {
+	if m.serverVersion != "" {
+		return jf.ParseServerVersion(m.serverVersion)
+	}
+	return jf.ServerVersion{Major: 12, Minor: 1}, nil
+}
+
 func (m *mockClient) BaseURL() string {
 	if m.baseURLVal != "" {
 		return m.baseURLVal
 	}
 	return "http://localhost:8096"
-}
-
-func (m *mockClient) APIKey() string {
-	if m.apiKeyVal != "" {
-		return m.apiKeyVal
-	}
-	return "test-api-key"
 }
 
 // jsonInto marshals data to JSON then unmarshals into dest.

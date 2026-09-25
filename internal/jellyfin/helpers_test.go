@@ -1074,7 +1074,7 @@ func TestFilterPrefix(t *testing.T) {
 		},
 		{
 			name:   "partial word match",
-			items:  []string{"Sci-Fi", "Science Fiction", "Scary Movie"},
+			items:  []string{"Sci-Fi", "Science Fiction", "Scary Stories"},
 			prefix: "sci",
 			want:   []string{"Sci-Fi", "Science Fiction"},
 		},
@@ -1128,6 +1128,21 @@ func TestSanitizeID(t *testing.T) {
 			id:   "simple-id-123",
 			want: "simple-id-123",
 		},
+		{
+			name: "a lone dot cannot collapse the path",
+			id:   ".",
+			want: "%2E",
+		},
+		{
+			name: "a parent reference cannot climb the path",
+			id:   "..",
+			want: "%2E%2E",
+		},
+		{
+			name: "a parent reference with a slash is escaped whole",
+			id:   "../System/Shutdown",
+			want: "..%2FSystem%2FShutdown",
+		},
 	}
 
 	for _, tt := range tests {
@@ -1135,6 +1150,29 @@ func TestSanitizeID(t *testing.T) {
 			got := SanitizeID(tt.id)
 			if got != tt.want {
 				t.Errorf("SanitizeID(%q) = %q, want %q", tt.id, got, tt.want)
+			}
+		})
+	}
+}
+
+// --- SplitIDs ---
+
+func TestSplitIDs(t *testing.T) {
+	tests := []struct {
+		name string
+		ids  []string
+		want []string
+	}{
+		{name: "one ID per element", ids: []string{"a", "b"}, want: []string{"a", "b"}},
+		{name: "an element holding a list is split", ids: []string{"a,b, c"}, want: []string{"a", "b", "c"}},
+		{name: "blank parts are dropped", ids: []string{" ", "a,,b", ""}, want: []string{"a", "b"}},
+		{name: "nil", ids: nil, want: []string{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := SplitIDs(tt.ids)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("SplitIDs(%q) = %q, want %q", tt.ids, got, tt.want)
 			}
 		})
 	}
@@ -1326,7 +1364,7 @@ func TestBuildProviderLinks(t *testing.T) {
 			want: map[string]string{
 				"IMDb": "https://www.imdb.com/title/tt0000001",
 				"TMDb": "https://www.themoviedb.org/movie/100",
-				"TVDB": "https://thetvdb.com/?id=200&tab=series",
+				"TVDB": "https://thetvdb.com/?id=200&tab=movie",
 			},
 		},
 		{
@@ -1367,5 +1405,43 @@ func TestBuildProviderLinks(t *testing.T) {
 					tt.providerIDs, tt.itemType, got, tt.want)
 			}
 		})
+	}
+}
+
+// --- ApplyMetadataFields ---
+
+// The item update endpoint reads the Genres and Tags string arrays. TagItems is
+// not a BaseItemDto property, and GenreItems is a response-only projection of
+// Genres, so neither is written.
+func TestApplyMetadataFields_WritesOnlyFieldsTheUpdateEndpointReads(t *testing.T) {
+	fetchedGenreItems := []any{map[string]any{"Name": "Genre A", "Id": "genre-a"}}
+	current := map[string]any{
+		"Id":         "item-1",
+		"Name":       "Test Movie",
+		"Genres":     []any{"Genre A"},
+		"GenreItems": fetchedGenreItems,
+		"Tags":       []any{"tag-a"},
+	}
+
+	ApplyMetadataFields(current, MetadataInput{
+		Genres:  []string{"Genre B", "Genre C"},
+		Tags:    []string{"tag-b"},
+		Studios: []string{"Studio A"},
+	})
+
+	if got, want := current["Genres"], []string{"Genre B", "Genre C"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("Genres = %v, want %v", got, want)
+	}
+	if got, want := current["Tags"], []string{"tag-b"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("Tags = %v, want %v", got, want)
+	}
+	if got, want := current["Studios"], []map[string]any{{"Name": "Studio A"}}; !reflect.DeepEqual(got, want) {
+		t.Errorf("Studios = %v, want %v", got, want)
+	}
+	if got, ok := current["TagItems"]; ok {
+		t.Errorf("TagItems = %v, want it unset", got)
+	}
+	if got := current["GenreItems"]; !reflect.DeepEqual(got, fetchedGenreItems) {
+		t.Errorf("GenreItems = %v, want the fetched value left unchanged", got)
 	}
 }

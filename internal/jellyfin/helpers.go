@@ -52,7 +52,20 @@ func ReportProgress(ctx context.Context, req *mcp.CallToolRequest, progress, tot
 }
 
 func SanitizeID(id string) string {
-	return url.PathEscape(id)
+	escaped := url.PathEscape(id)
+	// A bare "." or ".." survives escaping and would be resolved by the URL
+	// path join, so its dots are escaped too.
+	if escaped == "." || escaped == ".." {
+		return strings.ReplaceAll(escaped, ".", "%2E")
+	}
+	return escaped
+}
+
+// NormalizeID reduces a GUID to the form Jellyfin writes, 32 lower-case hex
+// digits without dashes, so that an ID given in the dashed or upper-case form
+// compares equal to the same ID as the server reports it.
+func NormalizeID(id string) string {
+	return strings.ToLower(strings.ReplaceAll(id, "-", ""))
 }
 
 func FormatJSON(v any) string {
@@ -166,18 +179,25 @@ func ToMap(v any) map[string]any {
 	return nil
 }
 
-func MapExtract(items []any, fn func(map[string]any) map[string]any) []map[string]any {
-	out := make([]map[string]any, 0, len(items))
-	for _, raw := range items {
-		if m := ToMap(raw); m != nil {
-			out = append(out, fn(m))
+// JoinIDs joins IDs into the comma-separated form Jellyfin's ids parameters
+// take.
+func JoinIDs(ids []string) string {
+	return strings.Join(ids, ",")
+}
+
+// SplitIDs returns the IDs in ids one per element, splitting any element that
+// holds a comma-separated list, so that counting them matches what an ids
+// parameter built from them sends.
+func SplitIDs(ids []string) []string {
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		for _, part := range strings.Split(id, ",") {
+			if part = strings.TrimSpace(part); part != "" {
+				out = append(out, part)
+			}
 		}
 	}
 	return out
-}
-
-func JoinIDs(ids []string) string {
-	return strings.Join(ids, ",")
 }
 
 func ToStringSlice(v any) []string {
@@ -235,47 +255,132 @@ func MaskToken(token string) string {
 	return token[:TokenRevealChars] + "..." + token[len(token)-TokenRevealChars:]
 }
 
-// ConfirmationGate returns a warning result if confirm is not true.
-// Returns nil if confirmed, allowing the caller to proceed.
-// When the client supports elicitation, it prompts the user directly
-// before falling back to the legacy confirm=true pattern.
+// confirmInput names the confirmation form in a tool result's input requests
+// and in the client's input responses.
+const confirmInput = "confirm"
+
+// DeclinedText is the result of a call whose confirmation the user declined
+// or dismissed. It names the user as the one who stopped the call and says
+// that nothing changed, so the assistant reports the outcome rather than a
+// vague cancellation.
+const DeclinedText = "The user didn't confirm, so nothing changed."
+
+// ConfirmationGate decides whether an operation that needs the user's
+// agreement may proceed. It returns nil when the caller has confirmed, with
+// confirm=true or an accepted form answer, and otherwise the result to send
+// instead of performing the operation. A client that declared form elicitation
+// gets an input request, which the SDK turns into a direct elicitation for a
+// client on a protocol before 2026-07-28; any other client gets a text warning
+// asking it to call again with confirm=true. The input request goes only to
+// clients that declared elicitation, because the SDK fails the call when it
+// cannot elicit. An unanswered or failed form fails the call, and nothing is
+// performed.
 func ConfirmationGate(ctx context.Context, req *mcp.CallToolRequest, confirm *bool, warning string) *mcp.CallToolResult {
 	if confirm != nil && *confirm {
 		return nil
 	}
-	// Try elicitation if the client supports it
-	if sess := req.Session; sess != nil {
-		if caps := sess.InitializeParams(); caps != nil && caps.Capabilities.Elicitation != nil {
-			result, err := sess.Elicit(ctx, &mcp.ElicitParams{
-				Message: warning,
-				RequestedSchema: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"confirm": map[string]any{
-							"type":        "boolean",
-							"description": "Set to true to confirm this destructive operation",
-							"default":     false,
-						},
-					},
-					"required": []string{"confirm"},
-				},
-			})
-			if err == nil && result != nil {
-				switch result.Action {
-				case "accept":
-					if v, ok := result.Content["confirm"].(bool); ok && v {
-						return nil
-					}
-					return TextResult("Operation cancelled by user.")
-				case "decline", "cancel":
-					return TextResult("Operation cancelled by user.")
-				}
+	if _, ok := req.Params.InputResponses[confirmInput]; ok {
+		if ConfirmedByUser(req) {
+			if state, ok := ctx.Value(confirmStateKey{}).(*confirmState); ok {
+				state.confirmed = true
 			}
-			// Elicitation failed — fall through to legacy prompt
+			return nil
+		}
+		return TextResult(DeclinedText)
+	}
+	if supportsFormElicitation(req.ClientCapabilities()) {
+		return &mcp.CallToolResult{
+			InputRequests: mcp.InputRequestMap{
+				confirmInput: &mcp.ElicitParams{
+					Mode:    "form",
+					Message: warning,
+					// The form has no fields: accepting it is the confirmation
+					// and declining it is the cancel, so there is nothing to
+					// tick and no way to accept without confirming.
+					RequestedSchema: map[string]any{
+						"type":       "object",
+						"properties": map[string]any{},
+					},
+				},
+			},
 		}
 	}
-	return TextResult("⚠️ CONFIRMATION REQUIRED\n\n" + warning +
-		"\n\nTo proceed, call this tool again with confirm=true.")
+	return TextResult("CONFIRMATION REQUIRED\n\n" + warning +
+		"\n\nPresent this to the user. Only after they agree, call this tool again with the same arguments and confirm=true.")
+}
+
+// confirmStateKey holds a confirmState in the context of one tool call. The
+// SDK answers the form for an older client inside the call and runs the
+// handler again with the answer, so the outer middleware never sees the
+// answered request; the gate records the confirmation here instead.
+type confirmStateKey struct{}
+
+type confirmState struct{ confirmed bool }
+
+// WithConfirmationTracking returns a context in which ConfirmationGate records
+// that the user confirmed the call, for ConfirmedInCall to read afterwards.
+func WithConfirmationTracking(ctx context.Context) context.Context {
+	return context.WithValue(ctx, confirmStateKey{}, &confirmState{})
+}
+
+// ConfirmedInCall reports whether a gate in this call passed on the user's
+// acceptance of the confirmation form.
+func ConfirmedInCall(ctx context.Context) bool {
+	state, ok := ctx.Value(confirmStateKey{}).(*confirmState)
+	return ok && state.confirmed
+}
+
+// ConfirmedByUser reports whether req carries the user's acceptance of the
+// confirmation form.
+func ConfirmedByUser(req *mcp.CallToolRequest) bool {
+	resp, ok := req.Params.InputResponses[confirmInput]
+	if !ok {
+		return false
+	}
+	answer, ok := resp.(*mcp.ElicitResult)
+	return ok && answer.Action == "accept"
+}
+
+// destructiveDisabledKey marks a context in which destructive actions are
+// refused.
+type destructiveDisabledKey struct{}
+
+// WithDestructiveDisabled returns a context in which DestructiveGate refuses
+// every action.
+func WithDestructiveDisabled(ctx context.Context) context.Context {
+	return context.WithValue(ctx, destructiveDisabledKey{}, true)
+}
+
+// DestructiveDisabled reports whether ctx refuses destructive actions.
+func DestructiveDisabled(ctx context.Context) bool {
+	v, _ := ctx.Value(destructiveDisabledKey{}).(bool)
+	return v
+}
+
+// DestructiveGate is ConfirmationGate for an action that deletes or removes
+// data, takes the server or a user's access away, cancels a recording, or
+// replaces a whole configuration. When the server runs with --disable-destructive, which
+// WithDestructiveDisabled records in ctx, the action is refused before any
+// confirmation is asked.
+func DestructiveGate(ctx context.Context, req *mcp.CallToolRequest, confirm *bool, warning string) *mcp.CallToolResult {
+	if DestructiveDisabled(ctx) {
+		return ErrResult("This action is disabled: the server runs with --disable-destructive, which refuses deletes, removals, restores, uninstalls, restarts, shutdowns, revocations, cancellations, version merges and splits, and password, policy, trigger, and whole-configuration changes.")
+	}
+	return ConfirmationGate(ctx, req, confirm, warning)
+}
+
+// supportsFormElicitation reports whether the calling client declared form
+// elicitation. The capabilities are the ones sent with the request itself on
+// the current protocol, where each request declares its own, and those from
+// initialization on older ones; either can be absent. A client that declares
+// elicitation without naming a mode is taken to support forms, as the
+// protocol specifies.
+func supportsFormElicitation(caps *mcp.ClientCapabilities) bool {
+	if caps == nil || caps.Elicitation == nil {
+		return false
+	}
+	e := caps.Elicitation
+	return e.Form != nil || e.URL == nil
 }
 
 // FilterPrefix returns items whose lowercase form starts with the given prefix.
@@ -295,6 +400,10 @@ func FilterPrefix(items []string, prefix string) []string {
 
 // ApplyMetadataFields applies user-provided metadata fields onto an existing
 // Jellyfin item map (fetched via GET). Only non-zero fields are applied.
+// Genres and tags are written only as the Genres and Tags string arrays, which
+// are what the item update endpoint reads. GenreItems is a response-only
+// projection of Genres that the endpoint ignores, and TagItems is not a
+// BaseItemDto property.
 func ApplyMetadataFields(current map[string]any, args MetadataInput) {
 	if args.Name != "" {
 		current["Name"] = args.Name
@@ -303,19 +412,9 @@ func ApplyMetadataFields(current map[string]any, args MetadataInput) {
 		current["Overview"] = args.Overview
 	}
 	if len(args.Genres) > 0 {
-		genreObjs := make([]map[string]any, len(args.Genres))
-		for i, g := range args.Genres {
-			genreObjs[i] = map[string]any{"Name": g}
-		}
-		current["GenreItems"] = genreObjs
 		current["Genres"] = args.Genres
 	}
 	if len(args.Tags) > 0 {
-		tagObjs := make([]map[string]any, len(args.Tags))
-		for i, t := range args.Tags {
-			tagObjs[i] = map[string]any{"Name": t}
-		}
-		current["TagItems"] = tagObjs
 		current["Tags"] = args.Tags
 	}
 	if len(args.Studios) > 0 {
@@ -361,7 +460,12 @@ func BuildProviderLinks(providerIDs map[string]string, itemType string) map[stri
 		links["TMDb"] = "https://www.themoviedb.org/" + segment + "/" + id
 	}
 	if id, ok := providerIDs["Tvdb"]; ok && id != "" {
-		links["TVDB"] = "https://thetvdb.com/?id=" + id + "&tab=series"
+		// TheTVDB catalogs movies separately from series.
+		tab := "series"
+		if itemType == "Movie" {
+			tab = "movie"
+		}
+		links["TVDB"] = "https://thetvdb.com/?id=" + id + "&tab=" + tab
 	}
 	return links
 }

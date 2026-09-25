@@ -2,6 +2,7 @@ package jellyfin
 
 import (
 	"context"
+	"io"
 	"net/url"
 )
 
@@ -13,12 +14,12 @@ type Client interface {
 	GetRaw(ctx context.Context, endpoint string, params url.Values) (string, error)
 	Post(ctx context.Context, endpoint string, params url.Values, reqBody any, dest any) error
 	PostNoContent(ctx context.Context, endpoint string, params url.Values, reqBody any) error
-	PostRaw(ctx context.Context, endpoint string, params url.Values, body []byte, contentType string) error
+	PostRaw(ctx context.Context, endpoint string, params url.Values, body io.Reader, size int64, contentType string) error
 	Del(ctx context.Context, endpoint string, params url.Values) error
 	DoRequest(ctx context.Context, method, endpoint string, params url.Values, body any) ([]byte, error)
 	GetUserID(ctx context.Context) (string, error)
+	ServerVersion(ctx context.Context) (ServerVersion, error)
 	BaseURL() string
-	APIKey() string
 }
 
 // compile-time check

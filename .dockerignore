@@ -17,7 +17,6 @@ npm/
 # CI, docs, and meta
 .github/
 README.md
-README.full.md
 CHANGELOG.md
 CONTRIBUTING.md
 RELEASING.md

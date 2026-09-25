@@ -1,25 +1,28 @@
 package jellyfin
 
 import (
+	"encoding/json"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // ---------------------------------------------------------------------------
-// ExtractMediaItem
+// MediaItemFrom
 // ---------------------------------------------------------------------------
 
-func TestExtractMediaItem(t *testing.T) {
+func TestMediaItemFrom(t *testing.T) {
 	tests := []struct {
 		name   string
 		input  map[string]any
 		expect map[string]any
 	}{
 		{
-			name:   "nil input returns empty map",
+			name:   "nil input returns an item with empty identity fields",
 			input:  nil,
-			expect: map[string]any{},
+			expect: map[string]any{"id": "", "name": "", "type": ""},
 		},
 		{
 			name: "minimal item with only Id, Name, Type",
@@ -40,11 +43,11 @@ func TestExtractMediaItem(t *testing.T) {
 				"Id":                "movie-001",
 				"Name":              "Lucid Horizon",
 				"Type":              "Movie",
-				"ProductionYear":    float64(2010),
-				"Overview":          "A rogue architect builds impossible worlds inside shared dreams.",
-				"CommunityRating":   float64(8.4),
+				"ProductionYear":    float64(2011),
+				"Overview":          "A cartographer maps a city that rearranges itself every night.",
+				"CommunityRating":   float64(7.3),
 				"OfficialRating":    "PG-13",
-				"RunTimeTicks":      float64(88200000000), // 147 minutes
+				"RunTimeTicks":      float64(72600000000), // 121 minutes
 				"SeriesName":        "MyShow",
 				"IndexNumber":       float64(3),
 				"ParentIndexNumber": float64(2),
@@ -58,11 +61,11 @@ func TestExtractMediaItem(t *testing.T) {
 				"id":                  "movie-001",
 				"name":                "Lucid Horizon",
 				"type":                "Movie",
-				"year":                2010,
-				"overview":            "A rogue architect builds impossible worlds inside shared dreams.",
-				"community_rating":    float64(8.4),
+				"year":                2011,
+				"overview":            "A cartographer maps a city that rearranges itself every night.",
+				"community_rating":    float64(7.3),
 				"official_rating":     "PG-13",
-				"runtime_minutes":     int64(88200000000) / TicksPerMinute,
+				"runtime_minutes":     int64(72600000000) / TicksPerMinute,
 				"played":              true,
 				"progress":            "85%",
 				"favorite":            true,
@@ -199,17 +202,17 @@ func TestExtractMediaItem(t *testing.T) {
 			name: "series context fields",
 			input: map[string]any{
 				"Id":                "ep1",
-				"Name":              "Pilot",
+				"Name":              "First Light",
 				"Type":              "Episode",
-				"SeriesName":        "Vanished",
+				"SeriesName":        "Harbor Lights",
 				"IndexNumber":       float64(1),
 				"ParentIndexNumber": float64(1),
 			},
 			expect: map[string]any{
 				"id":                  "ep1",
-				"name":                "Pilot",
+				"name":                "First Light",
 				"type":                "Episode",
-				"series_name":         "Vanished",
+				"series_name":         "Harbor Lights",
 				"index_number":        1,
 				"parent_index_number": 1,
 			},
@@ -260,19 +263,16 @@ func TestExtractMediaItem(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ExtractMediaItem(tc.input)
-			if !reflect.DeepEqual(got, tc.expect) {
-				t.Errorf("ExtractMediaItem mismatch\n  got:    %v\n  expect: %v", got, tc.expect)
-			}
+			assertJSONEqual(t, MediaItemFrom(tc.input), tc.expect)
 		})
 	}
 }
 
 // ---------------------------------------------------------------------------
-// ExtractDetailedItem
+// DetailedItemFrom
 // ---------------------------------------------------------------------------
 
-func TestExtractDetailedItem(t *testing.T) {
+func TestDetailedItemFrom(t *testing.T) {
 	tests := []struct {
 		name   string
 		input  map[string]any
@@ -345,7 +345,7 @@ func TestExtractDetailedItem(t *testing.T) {
 				"Id":       "det4",
 				"Name":     "Sliced",
 				"Type":     "Movie",
-				"Taglines": []any{"Every layer hides another truth"},
+				"Taglines": []any{"Nothing stays where you left it"},
 				"Genres":   []any{"Action", "Sci-Fi"},
 				"Artists":  []any{"Elara Voss"},
 			},
@@ -353,7 +353,7 @@ func TestExtractDetailedItem(t *testing.T) {
 				"id":       "det4",
 				"name":     "Sliced",
 				"type":     "Movie",
-				"taglines": []string{"Every layer hides another truth"},
+				"taglines": []string{"Nothing stays where you left it"},
 				"genres":   []string{"Action", "Sci-Fi"},
 				"artists":  []string{"Elara Voss"},
 			},
@@ -377,7 +377,7 @@ func TestExtractDetailedItem(t *testing.T) {
 			},
 		},
 		{
-			name: "empty studios list omitted",
+			name: "empty studios list serializes as []",
 			input: map[string]any{
 				"Id":      "det5b",
 				"Name":    "No Studios",
@@ -422,6 +422,7 @@ func TestExtractDetailedItem(t *testing.T) {
 					"name":   "Many People",
 					"type":   "Movie",
 					"people": pl,
+					"notes":  []any{fmt.Sprintf("people lists the first %d of 20 cast and crew. To check whether someone else appears in this item, use jellyfin_browse with person set to their name.", MaxPeopleInDetail)},
 				}
 			}(),
 		},
@@ -489,7 +490,7 @@ func TestExtractDetailedItem(t *testing.T) {
 				"external_urls": map[string]string{
 					"IMDb": "https://www.imdb.com/title/tt1234567",
 					"TMDb": "https://www.themoviedb.org/movie/12345",
-					"TVDB": "https://thetvdb.com/?id=67890&tab=series",
+					"TVDB": "https://thetvdb.com/?id=67890&tab=movie",
 				},
 			},
 		},
@@ -721,7 +722,9 @@ func TestExtractDetailedItem(t *testing.T) {
 			},
 		},
 		{
-			name: "file path and file name",
+			// BaseItemDto has no FileName property, so a stray key of that
+			// name is not read.
+			name: "file path without file name",
 			input: map[string]any{
 				"Id":       "det10",
 				"Name":     "File Path Test",
@@ -734,7 +737,6 @@ func TestExtractDetailedItem(t *testing.T) {
 				"name":      "File Path Test",
 				"type":      "Movie",
 				"file_path": "/media/movies/test.mkv",
-				"file_name": "test.mkv",
 			},
 		},
 		{
@@ -835,19 +837,24 @@ func TestExtractDetailedItem(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ExtractDetailedItem(tc.input)
-			if !reflect.DeepEqual(got, tc.expect) {
-				t.Errorf("ExtractDetailedItem mismatch\n  got:    %v\n  expect: %v", got, tc.expect)
+			// The list fields are always present, as [] when the item has none.
+			for _, k := range []string{"genres", "tags", "studios", "locked_fields"} {
+				if _, ok := tc.expect[k]; !ok {
+					tc.expect[k] = []any{}
+				}
 			}
+			assertJSONEqual(t, DetailedItemFrom(tc.input), tc.expect)
 		})
 	}
 }
 
 // ---------------------------------------------------------------------------
-// ExtractSessionInfo
+// SessionFrom
 // ---------------------------------------------------------------------------
 
-func TestExtractSessionInfo(t *testing.T) {
+func TestSessionFrom(t *testing.T) {
+	// Activity times are instants, shown with the server zone's offset.
+	inZone(t, time.FixedZone("UTC+9", 9*60*60))
 	tests := []struct {
 		name   string
 		input  map[string]any
@@ -860,6 +867,7 @@ func TestExtractSessionInfo(t *testing.T) {
 				"UserName":         "alice",
 				"Client":           "Jellyfin Web",
 				"DeviceName":       "Chrome",
+				"Capabilities":     map[string]any{"SupportsMediaControl": true},
 				"LastActivityDate": "2024-08-01T12:30:45.1234567Z",
 				"NowPlayingItem": map[string]any{
 					"Id":           "item-99",
@@ -874,11 +882,13 @@ func TestExtractSessionInfo(t *testing.T) {
 				},
 			},
 			expect: map[string]any{
-				"session_id":    "sess-001",
-				"user":          "alice",
-				"client":        "Jellyfin Web",
-				"device_name":   "Chrome",
-				"last_activity": "2024-08-01T12:30:45",
+				"session_id":             "sess-001",
+				"user":                   "alice",
+				"client":                 "Jellyfin Web",
+				"device_name":            "Chrome",
+				"supports_media_control": true,
+				"last_activity":          "2024-08-01T21:30:45+09:00",
+				"status":                 "playing",
 				"now_playing": map[string]any{
 					"id":              "item-99",
 					"name":            "Distant Orbits",
@@ -903,11 +913,13 @@ func TestExtractSessionInfo(t *testing.T) {
 				"LastActivityDate": "2024-08-01T10:00:00.0000000Z",
 			},
 			expect: map[string]any{
-				"session_id":    "sess-002",
-				"user":          "bob",
-				"client":        "Android TV",
-				"device_name":   "Living Room TV",
-				"last_activity": "2024-08-01T10:00:00",
+				"session_id":             "sess-002",
+				"user":                   "bob",
+				"client":                 "Android TV",
+				"device_name":            "Living Room TV",
+				"supports_media_control": false,
+				"last_activity":          "2024-08-01T19:00:00+09:00",
+				"status":                 "connected",
 			},
 		},
 		{
@@ -930,11 +942,13 @@ func TestExtractSessionInfo(t *testing.T) {
 				},
 			},
 			expect: map[string]any{
-				"session_id":    "sess-003",
-				"user":          "carol",
-				"client":        "iOS",
-				"device_name":   "iPhone",
-				"last_activity": "2024-01-01T00:00:00",
+				"session_id":             "sess-003",
+				"user":                   "carol",
+				"client":                 "iOS",
+				"device_name":            "iPhone",
+				"supports_media_control": false,
+				"last_activity":          "2024-01-01T09:00:00+09:00",
+				"status":                 "playing",
 				"now_playing": map[string]any{
 					"id":   "item-50",
 					"name": "Short Film",
@@ -961,11 +975,13 @@ func TestExtractSessionInfo(t *testing.T) {
 				},
 			},
 			expect: map[string]any{
-				"session_id":    "sess-004",
-				"user":          "dave",
-				"client":        "Web",
-				"device_name":   "Firefox",
-				"last_activity": "2024-05-20T08:15:00",
+				"session_id":             "sess-004",
+				"user":                   "dave",
+				"client":                 "Web",
+				"device_name":            "Firefox",
+				"supports_media_control": false,
+				"last_activity":          "2024-05-20T17:15:00+09:00",
+				"status":                 "playing",
 				"now_playing": map[string]any{
 					"id":   "item-live",
 					"name": "Live Stream",
@@ -977,19 +993,16 @@ func TestExtractSessionInfo(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ExtractSessionInfo(tc.input)
-			if !reflect.DeepEqual(got, tc.expect) {
-				t.Errorf("ExtractSessionInfo mismatch\n  got:    %v\n  expect: %v", got, tc.expect)
-			}
+			assertJSONEqual(t, SessionFrom(tc.input), tc.expect)
 		})
 	}
 }
 
 // ---------------------------------------------------------------------------
-// ExtractLibraries
+// LibrariesFrom
 // ---------------------------------------------------------------------------
 
-func TestExtractLibraries(t *testing.T) {
+func TestLibrariesFrom(t *testing.T) {
 	tests := []struct {
 		name   string
 		input  []map[string]any
@@ -1107,10 +1120,7 @@ func TestExtractLibraries(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ExtractLibraries(tc.input)
-			if !reflect.DeepEqual(got, tc.expect) {
-				t.Errorf("ExtractLibraries mismatch\n  got:    %v\n  expect: %v", got, tc.expect)
-			}
+			assertJSONEqual(t, LibrariesFrom(tc.input), tc.expect)
 		})
 	}
 }
@@ -1120,6 +1130,8 @@ func TestExtractLibraries(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestExtractUserSummary(t *testing.T) {
+	// Activity times are instants, shown with the server zone's offset.
+	inZone(t, time.FixedZone("UTC+9", 9*60*60))
 	tests := []struct {
 		name   string
 		input  map[string]any
@@ -1141,8 +1153,8 @@ func TestExtractUserSummary(t *testing.T) {
 				"id":            "user-001",
 				"name":          "admin",
 				"is_admin":      true,
-				"last_activity": "2024-08-01T12:00:00",
-				"last_login":    "2024-08-01T11:00:00",
+				"last_activity": "2024-08-01T21:00:00+09:00",
+				"last_login":    "2024-08-01T20:00:00+09:00",
 			},
 		},
 		{
@@ -1258,7 +1270,6 @@ func TestExtractDetailedUser(t *testing.T) {
 				"id":                          "du-001",
 				"name":                        "fulluser",
 				"is_admin":                    true,
-				"has_password":                true,
 				"enable_all_folders":          true,
 				"max_parental_rating":         13,
 				"blocked_tags":                []string{"horror", "gore"},
@@ -1348,15 +1359,16 @@ func TestExtractDetailedUser(t *testing.T) {
 			},
 		},
 		{
-			name: "HasPassword false is omitted",
+			// Jellyfin 12 sends HasPassword as a constant true.
+			name: "HasPassword is not reported",
 			input: map[string]any{
 				"Id":          "du-006",
-				"Name":        "nopass",
-				"HasPassword": false,
+				"Name":        "withpass",
+				"HasPassword": true,
 			},
 			expect: map[string]any{
 				"id":       "du-006",
-				"name":     "nopass",
+				"name":     "withpass",
 				"is_admin": false,
 			},
 		},
@@ -1430,10 +1442,10 @@ func TestExtractDetailedUser(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// ExtractItemList
+// ItemsFrom
 // ---------------------------------------------------------------------------
 
-func TestExtractItemList(t *testing.T) {
+func TestItemsFrom(t *testing.T) {
 	tests := []struct {
 		name   string
 		input  map[string]any
@@ -1504,7 +1516,7 @@ func TestExtractItemList(t *testing.T) {
 			},
 		},
 		{
-			name: "Items values are processed through ExtractMediaItem",
+			name: "Items values are processed through MediaItemFrom",
 			input: map[string]any{
 				"Items": []any{
 					map[string]any{
@@ -1530,10 +1542,66 @@ func TestExtractItemList(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ExtractItemList(tc.input)
-			if !reflect.DeepEqual(got, tc.expect) {
-				t.Errorf("ExtractItemList mismatch\n  got:    %v\n  expect: %v", got, tc.expect)
-			}
+			assertJSONEqual(t, ItemsFrom(tc.input), tc.expect)
 		})
+	}
+}
+
+// assertJSONEqual compares got and want by the JSON they encode to, so a typed
+// result can be checked against a map literal of the fields it must show.
+func assertJSONEqual(t *testing.T, got, want any) {
+	t.Helper()
+	gotJSON, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("marshaling got: %v", err)
+	}
+	wantJSON, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("marshaling want: %v", err)
+	}
+	var gotValue, wantValue any
+	if err := json.Unmarshal(gotJSON, &gotValue); err != nil {
+		t.Fatalf("unmarshaling got: %v", err)
+	}
+	if err := json.Unmarshal(wantJSON, &wantValue); err != nil {
+		t.Fatalf("unmarshaling want: %v", err)
+	}
+	if !reflect.DeepEqual(gotValue, wantValue) {
+		t.Errorf("JSON mismatch\n  got:  %s\n  want: %s", gotJSON, wantJSON)
+	}
+}
+
+// The details carry the day the item was added and, for HDR video, the HDR
+// format; a format Jellyfin reports as Unknown is left out.
+func TestDetailedItemFrom_DateAddedAndVideoRangeType(t *testing.T) {
+	inZone(t, time.UTC)
+	source := func(rangeType string) map[string]any {
+		return map[string]any{
+			"Id": "hdr-1", "Name": "HDR Test", "Type": "Movie",
+			"DateCreated": "2026-03-10T12:00:00.1234567Z",
+			"MediaSources": []any{map[string]any{
+				"Container":    "mkv",
+				"MediaStreams": []any{map[string]any{"Type": "Video", "Codec": "hevc", "VideoRange": "HDR", "VideoRangeType": rangeType}},
+			}},
+		}
+	}
+	item := DetailedItemFrom(source("DOVIWithHDR10"))
+	if item.DateAdded != "2026-03-10" {
+		t.Errorf("date_added = %q, want 2026-03-10", item.DateAdded)
+	}
+	if len(item.MediaSources) != 1 || item.MediaSources[0].VideoRangeType != "DOVIWithHDR10" || item.MediaSources[0].VideoRange != "HDR" {
+		t.Errorf("media_sources = %+v", item.MediaSources)
+	}
+	if got := DetailedItemFrom(source("Unknown")).MediaSources[0].VideoRangeType; got != "" {
+		t.Errorf("video_range_type = %q for Unknown, want none", got)
+	}
+}
+
+// A series keeps its EndDate out of the compact item: without a StartDate it
+// is a calendar day, not the end of a broadcast.
+func TestMediaItemFrom_SeriesEndDateIsNotAnEndTime(t *testing.T) {
+	item := MediaItemFrom(map[string]any{"Id": "s1", "Name": "Show", "Type": "Series", "EndDate": "2020-05-01T00:00:00.0000000Z"})
+	if item.EndTime != "" || item.StartTime != "" {
+		t.Errorf("series item = %+v, want no start_time or end_time", item)
 	}
 }

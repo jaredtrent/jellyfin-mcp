@@ -1,9 +1,11 @@
 package tools
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"net/url"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -24,12 +26,13 @@ func RegisterAdminSystemTools(server *mcp.Server, client jf.Client, enabled func
 			InputSchema: jf.WithEnums[jf.SystemInfoInput](map[string][]any{
 				"action": {"whoami", "info", "storage", "activity_log", "ping", "logs", "log_file", "playback_history", "health_check"},
 			}),
-			Description: "Get server information and status. Actions cover user identity, server info, storage, activity logs, ping, log files, and playback history." +
+			Description: "Get server information and status. Actions cover user identity (whoami), server info, storage, activity logs, ping, log files, playback history, and a one-call health_check." +
 				"\n\nAction notes:" +
-				"\n- activity_log: Shows user-level events (logins, playback start/stop, session activity) — NOT server errors. For server errors and warnings, use the log_file action instead." +
+				"\n- activity_log: Shows activity events (logins and failed logins, playback start/stop, session activity, task and plugin results), newest first; this is not the server's log. Filter with type, severity, item_id, user_id, min_date, and max_date; sort with sort_by and sort_order. For the server's own errors and warnings, use the log_file action instead." +
 				"\n- playback_history: Returns items with play counts, last-played dates, and an actual_playback flag (true = verified playback session in activity log, false = manually marked as watched or playback event expired from log). When the user asks 'what did I watch/last watch', use default verified_only=true. When they ask 'what's marked as watched', set verified_only=false to include manually marked items." +
-				"\n- logs: Lists available log files. Tip: most server logs are named log_*.log — FFmpeg transcode logs are named FFmpeg.*.log." +
-				"\n- log_file: Reads the content of a specific log file. Look for [WRN] and [ERR] tags for warnings and errors.",
+				"\n- logs: Lists available log files. Tip: most server logs are named log_*.log, and FFmpeg transcode logs are named FFmpeg.*.log." +
+				"\n- log_file: Reads a server log as entries, each with its exception message and the first frames of its stack trace, and returns the newest that match. Filter with severity, min_date and max_date, and contains. " +
+				fmt.Sprintf("A result holds at most %d entries (limit, default %d) and about %d characters; the result says how to reach the earlier entries it leaves out.", jf.LogFileMaxEntries, jf.LogFileDefaultEntries, jf.LogFileMaxChars),
 			Annotations: AnnotReadOnly,
 		}, func(ctx context.Context, req *mcp.CallToolRequest, args jf.SystemInfoInput) (*mcp.CallToolResult, any, error) {
 			switch args.Action {
@@ -74,10 +77,10 @@ func RegisterAdminSystemTools(server *mcp.Server, client jf.Client, enabled func
 					result["max_parental_rating"] = jf.GetInt(policy, "MaxParentalRating")
 				}
 				if la := jf.GetString(user, "LastActivityDate"); la != "" {
-					result["last_activity"] = jf.Truncate(la, jf.DateTimeLen)
+					result["last_activity"] = jf.LocalDateTime(la)
 				}
 				if ll := jf.GetString(user, "LastLoginDate"); ll != "" {
-					result["last_login"] = jf.Truncate(ll, jf.DateTimeLen)
+					result["last_login"] = jf.LocalDateTime(ll)
 				}
 				return jf.TextResult(fmt.Sprintf("Current user:\n\n%s", jf.FormatJSON(result))), nil, nil
 
@@ -86,18 +89,16 @@ func RegisterAdminSystemTools(server *mcp.Server, client jf.Client, enabled func
 				if err := client.Get(ctx, "/System/Info", nil, &info); err != nil {
 					return jf.ErrResult("Jellyfin API error: %v", err), nil, nil
 				}
-				os := jf.GetString(info, "OperatingSystem")
-				if os == "" {
-					os = jf.GetString(info, "OperatingSystemDisplayName")
-				}
+				// SystemInfo's OperatingSystem, OperatingSystemDisplayName,
+				// CanSelfRestart, and HasUpdateAvailable are obsolete. The server
+				// never sets them, so they carry only their defaults and are not
+				// reported.
 				result := map[string]any{
 					"server_name":              jf.GetString(info, "ServerName"),
 					"version":                  jf.GetString(info, "Version"),
-					"os":                       os,
 					"id":                       jf.GetString(info, "Id"),
 					"startup_wizard_completed": jf.GetBool(info, "StartupWizardCompleted"),
 					"has_pending_restart":      jf.GetBool(info, "HasPendingRestart"),
-					"has_update_available":     jf.GetBool(info, "HasUpdateAvailable"),
 				}
 				if lo := jf.GetString(info, "LocalAddress"); lo != "" {
 					result["local_address"] = lo
@@ -105,64 +106,13 @@ func RegisterAdminSystemTools(server *mcp.Server, client jf.Client, enabled func
 				if pkg := jf.GetString(info, "PackageName"); pkg != "" {
 					result["package_name"] = pkg
 				}
-				if jf.GetBool(info, "CanSelfRestart") {
-					result["can_self_restart"] = true
-				}
 				return jf.TextResult(jf.FormatJSON(result)), nil, nil
 
 			case "storage":
 				return handleStorage(ctx, client)
 
 			case "activity_log":
-				maxItems := jf.ClampInt(args.Limit, 200, jf.MaxLimitCap)
-				params := url.Values{}
-				if args.MinDate != "" {
-					params.Set("MinDate", args.MinDate)
-				}
-				rawItems, _, err := jf.FetchAllPages(ctx, client, "/System/ActivityLog/Entries", params, maxItems)
-				if err != nil {
-					return jf.ErrResult("Jellyfin API error: %v", err), nil, nil
-				}
-				entries := make([]map[string]any, 0, len(rawItems))
-				typeFilter := args.Type
-				userFilter := args.UserID
-				for _, raw := range rawItems {
-					m := jf.ToMap(raw)
-					entryType := jf.GetString(m, "Type")
-					// Client-side type filter
-					if typeFilter != "" && entryType != typeFilter {
-						continue
-					}
-					// Client-side user filter
-					if userFilter != "" && jf.GetString(m, "UserId") != userFilter {
-						continue
-					}
-					entry := map[string]any{
-						"date":     jf.Truncate(jf.GetString(m, "Date"), jf.DateTimeLen),
-						"name":     jf.GetString(m, "Name"),
-						"type":     entryType,
-						"severity": jf.GetString(m, "Severity"),
-					}
-					if overview := jf.GetString(m, "Overview"); overview != "" {
-						entry["overview"] = jf.Truncate(overview, jf.OverviewMaxLen)
-					}
-					if uid := jf.GetString(m, "UserId"); uid != "" {
-						entry["user_id"] = uid
-					}
-					if itemID := jf.GetString(m, "ItemId"); itemID != "" {
-						entry["item_id"] = itemID
-					}
-					entries = append(entries, entry)
-				}
-				header := fmt.Sprintf("Activity log (%d entries", len(entries))
-				if typeFilter != "" {
-					header += fmt.Sprintf(", type=%s", typeFilter)
-				}
-				if args.MinDate != "" {
-					header += fmt.Sprintf(", since %s", args.MinDate)
-				}
-				header += ")"
-				return jf.TextResult(fmt.Sprintf("%s:\n\n%s", header, jf.FormatJSON(entries))), nil, nil
+				return handleActivityLog(ctx, client, args)
 
 			case "ping":
 				if err := client.PostNoContent(ctx, "/System/Ping", nil, nil); err != nil {
@@ -179,6 +129,9 @@ func RegisterAdminSystemTools(server *mcp.Server, client jf.Client, enabled func
 				logType := strings.ToLower(args.LogType)
 				if logType == "" {
 					logType = "main"
+				}
+				if !slices.Contains([]string{"main", "ffmpeg", "all"}, logType) {
+					return jf.ErrResult("log_type %q is not valid. Use main, ffmpeg, or all.", args.LogType), nil, nil
 				}
 				var mainCount, ffmpegCount int
 				entries := make([]map[string]any, 0, len(logs))
@@ -205,13 +158,13 @@ func RegisterAdminSystemTools(server *mcp.Server, client jf.Client, enabled func
 					}
 					entries = append(entries, map[string]any{
 						"name":          name,
-						"date_modified": jf.Truncate(jf.GetString(l, "DateModified"), jf.DateTimeLen),
+						"date_modified": jf.LocalDateTime(jf.GetString(l, "DateModified")),
 						"size":          jf.GetInt64(l, "Size"),
 					})
 				}
 				// Sort by date_modified descending
 				sort.Slice(entries, func(i, j int) bool {
-					return jf.GetString(entries[i], "date_modified") > jf.GetString(entries[j], "date_modified")
+					return jf.NewerFirst(jf.GetString(entries[i], "date_modified"), jf.GetString(entries[j], "date_modified"))
 				})
 				limit := jf.ClampInt(args.Limit, 25, jf.MaxLimitCap)
 				if len(entries) > limit {
@@ -226,47 +179,7 @@ func RegisterAdminSystemTools(server *mcp.Server, client jf.Client, enabled func
 				return jf.TextResult(fmt.Sprintf("%s:\n\n%s", header, jf.FormatJSON(entries))), nil, nil
 
 			case "log_file":
-				if args.Name == "" {
-					return jf.ErrResult("name is required for log_file. Use 'logs' action to list available log files."), nil, nil
-				}
-				params := url.Values{"name": {args.Name}}
-				logContent, err := client.GetRaw(ctx, "/System/Logs/Log", params)
-				if err != nil {
-					return jf.ErrResult("Jellyfin API error: %v", err), nil, nil
-				}
-				limit := jf.ClampInt(args.Limit, 200, jf.MaxLimitCap)
-				lines := strings.Split(logContent, "\n")
-				// Apply severity filter before tail limit
-				severity := strings.ToLower(args.Severity)
-				if severity != "" && severity != "all" {
-					filtered := make([]string, 0, len(lines))
-					for _, line := range lines {
-						switch severity {
-						case "warn":
-							if strings.Contains(line, "[WRN]") {
-								filtered = append(filtered, line)
-							}
-						case "error":
-							if strings.Contains(line, "[ERR]") {
-								filtered = append(filtered, line)
-							}
-						case "warn+error":
-							if strings.Contains(line, "[WRN]") || strings.Contains(line, "[ERR]") {
-								filtered = append(filtered, line)
-							}
-						}
-					}
-					totalMatches := len(filtered)
-					if len(filtered) > limit {
-						filtered = filtered[len(filtered)-limit:]
-					}
-					return jf.TextResult(fmt.Sprintf("Log file '%s' (severity=%s, %d matches, showing last %d):\n\n%s", args.Name, severity, totalMatches, len(filtered), strings.Join(filtered, "\n"))), nil, nil
-				}
-				// No severity filter — tail the raw output
-				if len(lines) > limit {
-					lines = lines[len(lines)-limit:]
-				}
-				return jf.TextResult(fmt.Sprintf("Log file '%s' (last %d lines):\n\n%s", args.Name, len(lines), strings.Join(lines, "\n"))), nil, nil
+				return handleLogFile(ctx, client, args)
 
 			case "playback_history":
 				return handlePlaybackHistory(ctx, client, args)
@@ -289,28 +202,28 @@ func RegisterAdminSystemTools(server *mcp.Server, client jf.Client, enabled func
 				"action": {"restart", "shutdown"},
 			}),
 			Description: "Restart or shut down the Jellyfin server. These are destructive operations that cannot be undone. " +
-				"Use 'restart' to restart the server (it will be temporarily unavailable). " +
+				"Use 'restart' to restart the server (it is unavailable while it restarts). " +
 				"Use 'shutdown' to stop the server completely (must be manually restarted).",
 			Annotations: AnnotDestructive,
 		}, func(ctx context.Context, req *mcp.CallToolRequest, args jf.SystemControlInput) (*mcp.CallToolResult, any, error) {
 			switch args.Action {
 			case "restart":
-				if result := jf.ConfirmationGate(ctx, req, args.Confirm, "This will RESTART the Jellyfin server. It will be temporarily unavailable during the restart."); result != nil {
+				if result := jf.DestructiveGate(ctx, req, args.Confirm, "Restart the Jellyfin server? It is unavailable while it restarts, and playback stops."); result != nil {
 					return result, nil, nil
 				}
 				if err := client.PostNoContent(ctx, "/System/Restart", nil, nil); err != nil {
 					return jf.ErrResult("Failed to restart: %v", err), nil, nil
 				}
-				return jf.TextResult("Server restart initiated. The server will be temporarily unavailable."), nil, nil
+				return jf.TextResult("Server restart started. The server is unavailable until it comes back."), nil, nil
 
 			case "shutdown":
-				if result := jf.ConfirmationGate(ctx, req, args.Confirm, "This will SHUT DOWN the Jellyfin server completely. It must be manually restarted afterward."); result != nil {
+				if result := jf.DestructiveGate(ctx, req, args.Confirm, "Shut down the Jellyfin server? It stays off until someone starts it again by hand."); result != nil {
 					return result, nil, nil
 				}
 				if err := client.PostNoContent(ctx, "/System/Shutdown", nil, nil); err != nil {
 					return jf.ErrResult("Failed to shutdown: %v", err), nil, nil
 				}
-				return jf.TextResult("Server shutdown initiated. The server will stop and must be manually restarted."), nil, nil
+				return jf.TextResult("Server shutdown started. It stays off until someone starts it again by hand."), nil, nil
 
 			default:
 				return jf.ErrResult("Invalid action '%s'. Valid actions: restart, shutdown", args.Action), nil, nil
@@ -322,9 +235,7 @@ func RegisterAdminSystemTools(server *mcp.Server, client jf.Client, enabled func
 func handleStorage(ctx context.Context, client jf.Client) (*mcp.CallToolResult, any, error) {
 	var info map[string]any
 	if err := client.Get(ctx, "/System/Info/Storage", nil, &info); err != nil {
-		if err2 := client.Get(ctx, "/System/Info", nil, &info); err2 != nil {
-			return jf.ErrResult("Jellyfin API error: %v", err), nil, nil
-		}
+		return jf.ErrResult("Jellyfin API error: %v", err), nil, nil
 	}
 	type mountEntry struct {
 		FreeSpace int64
@@ -381,6 +292,134 @@ func handleStorage(ctx context.Context, client jf.Client) (*mcp.CallToolResult, 
 	return jf.TextResult(fmt.Sprintf("Storage (%d mounts):\n\n%s", len(mountList), jf.FormatJSON(mountList))), nil, nil
 }
 
+// activitySorts maps the activity_log sort_by values to Jellyfin's fields.
+var activitySorts = map[string]string{"date": "DateCreated", "name": "Name", "type": "Type", "severity": "LogSeverity"}
+
+// isJellyfinID reports whether s is a Jellyfin ID: a GUID of 32 hexadecimal
+// digits, with or without dashes.
+func isJellyfinID(s string) bool {
+	id := jf.NormalizeID(s)
+	return len(id) == 32 && strings.Trim(id, "0123456789abcdef") == ""
+}
+
+func handleActivityLog(ctx context.Context, client jf.Client, args jf.SystemInfoInput) (*mcp.CallToolResult, any, error) {
+	q := jf.ActivityQuery{
+		Type:   args.Type,
+		ItemID: args.ItemID,
+		UserID: args.UserID,
+		Limit:  jf.ClampInt(args.Limit, 200, jf.MaxLimitCap),
+	}
+	var filters []string
+	if args.MinDate != "" {
+		t, _, err := parseDateArg("min_date", args.MinDate)
+		if err != nil {
+			return jf.ErrResult("%v", err), nil, nil
+		}
+		q.MinDate = t
+		filters = append(filters, "since "+args.MinDate)
+	}
+	if args.MaxDate != "" {
+		t, err := parseMaxDateArg("max_date", args.MaxDate)
+		if err != nil {
+			return jf.ErrResult("%v", err), nil, nil
+		}
+		q.MaxDate = t
+		filters = append(filters, "until "+args.MaxDate)
+	}
+	if !q.MinDate.IsZero() && !q.MaxDate.IsZero() && q.MinDate.After(q.MaxDate) {
+		return jf.ErrResult("min_date (%s) is later than max_date (%s)", args.MinDate, args.MaxDate), nil, nil
+	}
+	for level := range strings.SplitSeq(args.Severity, ",") {
+		level = strings.TrimSpace(level)
+		if level == "" {
+			continue
+		}
+		i := slices.IndexFunc(jf.ActivitySeverities, func(s string) bool { return strings.EqualFold(s, level) })
+		if i < 0 {
+			return jf.ErrResult("severity for activity_log must be one or more of %s, separated by commas, not %q", strings.Join(jf.ActivitySeverities, ", "), level), nil, nil
+		}
+		if !slices.Contains(q.Severities, jf.ActivitySeverities[i]) {
+			q.Severities = append(q.Severities, jf.ActivitySeverities[i])
+		}
+	}
+	if len(q.Severities) > 0 {
+		filters = append(filters, "severity="+strings.Join(q.Severities, ","))
+	}
+	sortBy := strings.ToLower(cmp.Or(args.SortBy, "date"))
+	q.SortBy = activitySorts[sortBy]
+	if q.SortBy == "" {
+		return jf.ErrResult("sort_by for activity_log must be date, name, type, or severity, not %q", args.SortBy), nil, nil
+	}
+	switch strings.ToLower(args.SortOrder) {
+	case "":
+		// Names and types read best A to Z; dates and severities, the most
+		// recent or most severe first.
+		q.Ascending = sortBy == "name" || sortBy == "type"
+	case "ascending":
+		q.Ascending = true
+	case "descending":
+	default:
+		return jf.ErrResult("sort_order must be ascending or descending, not %q", args.SortOrder), nil, nil
+	}
+	if args.ItemID != "" && !isJellyfinID(args.ItemID) {
+		return jf.ErrResult("item_id must be a Jellyfin item ID of 32 hexadecimal digits, with or without dashes, not %q", args.ItemID), nil, nil
+	}
+	for _, f := range []struct{ name, value string }{{"type", args.Type}, {"item_id", args.ItemID}, {"user_id", args.UserID}} {
+		if f.value != "" {
+			filters = append(filters, f.name+"="+f.value)
+		}
+	}
+
+	found, err := jf.QueryActivity(ctx, client, q)
+	if err != nil {
+		return jf.ErrResult("Jellyfin API error: %v", err), nil, nil
+	}
+	entries := make([]map[string]any, 0, len(found.Entries))
+	for _, m := range found.Entries {
+		entry := map[string]any{
+			"date":     jf.LocalDateTime(jf.GetString(m, "Date")),
+			"name":     jf.GetString(m, "Name"),
+			"type":     jf.GetString(m, "Type"),
+			"severity": jf.GetString(m, "Severity"),
+		}
+		if overview := jf.GetString(m, "Overview"); overview != "" {
+			entry["overview"] = jf.Truncate(overview, jf.OverviewMaxLen)
+		}
+		if uid := jf.GetString(m, "UserId"); uid != "" {
+			entry["user_id"] = uid
+		}
+		if itemID := jf.GetString(m, "ItemId"); itemID != "" {
+			entry["item_id"] = itemID
+		}
+		entries = append(entries, entry)
+	}
+	header := fmt.Sprintf("Activity log (%d entries", len(entries))
+	if len(filters) > 0 {
+		header += ", " + strings.Join(filters, ", ")
+	}
+	if sortBy != "date" || q.Ascending {
+		order := "descending"
+		if q.Ascending {
+			order = "ascending"
+		}
+		header += fmt.Sprintf(", sorted by %s %s", sortBy, order)
+	}
+	header += ")"
+	msg := fmt.Sprintf("%s:\n\n%s", header, jf.FormatJSON(entries))
+	if found.Capped {
+		msg += fmt.Sprintf("\n\nOnly the %d most recent entries were examined, so older matches may be missing. Narrow the dates with min_date and max_date to reach them.", jf.ActivityLogLookback)
+	}
+	return jf.TextResult(msg), nil, nil
+}
+
+// playbackEntry is a played item with what the play state adds: the play
+// count, and whether the activity log verifies a playback.
+type playbackEntry struct {
+	jf.MediaItem
+	PlayCount      int   `json:"play_count,omitempty"`
+	ActualPlayback *bool `json:"actual_playback,omitempty"`
+}
+
 func handlePlaybackHistory(ctx context.Context, client jf.Client, args jf.SystemInfoInput) (*mcp.CallToolResult, any, error) {
 	userID, err := client.GetUserID(ctx)
 	if err != nil {
@@ -389,60 +428,44 @@ func handlePlaybackHistory(ctx context.Context, client jf.Client, args jf.System
 	maxItems := jf.ClampInt(args.Limit, 500, jf.MaxLimitCap)
 	targetUser := userID
 	if args.UserID != "" {
-		targetUser = jf.SanitizeID(args.UserID)
+		targetUser = args.UserID
 	}
 	params := url.Values{
+		"UserId":    {targetUser},
 		"Recursive": {"true"},
 		"Filters":   {"IsPlayed"},
 		"SortBy":    {"DatePlayed"},
 		"SortOrder": {"Descending"},
-		"Fields":    {"Overview,ProductionYear,RunTimeTicks,UserData"},
+		"Fields":    {"Overview"},
 	}
-	endpoint := fmt.Sprintf("/Users/%s/Items", jf.SanitizeID(targetUser))
-	rawItems, total, err := jf.FetchAllPages(ctx, client, endpoint, params, maxItems)
+	rawItems, total, err := jf.FetchAllPages(ctx, client, "/Items", params, maxItems)
 	if err != nil {
 		return jf.ErrResult("Jellyfin API error: %v", err), nil, nil
 	}
 
-	playedViaPlayback := map[string]bool{}
-	logParams := url.Values{}
-	logItems, _, logErr := jf.FetchAllPages(ctx, client, "/System/ActivityLog/Entries", logParams, jf.ActivityLogLookback)
-	if logErr == nil {
-		for _, raw := range logItems {
-			m := jf.ToMap(raw)
-			if jf.GetString(m, "Type") != "VideoPlaybackStopped" {
-				continue
-			}
-			if jf.GetString(m, "UserId") != targetUser {
-				continue
-			}
-			if itemID := jf.GetString(m, "ItemId"); itemID != "" {
-				playedViaPlayback[itemID] = true
-			}
-		}
+	verifiedOnly := args.VerifiedOnly == nil || *args.VerifiedOnly
+	// Without the activity log, playback can be listed but not verified.
+	playedViaPlayback, verifyErr := jf.PlayedItemIDs(ctx, client, targetUser)
+	if verifyErr != nil && verifiedOnly {
+		return jf.ErrResult("Jellyfin API error: %v. Set verified_only=false to list items marked played without verifying them.", verifyErr), nil, nil
 	}
 
-	verifiedOnly := args.VerifiedOnly == nil || *args.VerifiedOnly
-
-	entries := make([]map[string]any, 0, len(rawItems))
+	entries := make([]playbackEntry, 0, len(rawItems))
 	for _, raw := range rawItems {
 		m := jf.ToMap(raw)
-		entry := jf.ExtractMediaItem(m)
+		entry := playbackEntry{MediaItem: jf.MediaItemFrom(m)}
 		if ud := jf.ToMap(m["UserData"]); ud != nil {
 			if lp := jf.GetString(ud, "LastPlayedDate"); lp != "" {
-				entry["last_played"] = jf.Truncate(lp, jf.DateTimeLen)
+				entry.LastPlayed = jf.LocalDateTime(lp)
 			}
 			if pc := jf.GetInt(ud, "PlayCount"); pc > 0 {
-				entry["play_count"] = pc
+				entry.PlayCount = pc
 			}
-			if pct := jf.GetFloat(ud, "PlayedPercentage"); pct > 0 {
-				entry["progress"] = fmt.Sprintf("%.0f%%", pct)
-			}
-			entry["completed"] = jf.GetBool(ud, "Played")
 		}
-		id, _ := entry["id"].(string)
-		actual := playedViaPlayback[id]
-		entry["actual_playback"] = actual
+		actual := playedViaPlayback[jf.NormalizeID(entry.ID)]
+		if verifyErr == nil {
+			entry.ActualPlayback = &actual
+		}
 		if verifiedOnly && !actual {
 			continue
 		}
@@ -451,11 +474,18 @@ func handlePlaybackHistory(ctx context.Context, client jf.Client, args jf.System
 	header := fmt.Sprintf("Playback history (%d items", len(entries))
 	if verifiedOnly {
 		header += fmt.Sprintf(", verified_only=true, %d total marked played", total)
+		if total > len(rawItems) {
+			header += fmt.Sprintf(", the %d most recently played checked", len(rawItems))
+		}
 	} else {
 		header += fmt.Sprintf(" of %d total", total)
 	}
-	header += ")"
-	return jf.TextResult(fmt.Sprintf("%s:\n\n%s", header, jf.FormatJSON(entries))), nil, nil
+	header += "). played means finished at least once; progress is the position saved by the latest play"
+	msg := fmt.Sprintf("%s:\n\n%s", header, jf.FormatJSON(entries))
+	if verifyErr != nil {
+		msg += fmt.Sprintf("\n\nPlayback could not be verified, so actual_playback is left out: %v", verifyErr)
+	}
+	return jf.TextResult(msg), nil, nil
 }
 
 func handleHealthCheck(ctx context.Context, client jf.Client) (*mcp.CallToolResult, any, error) {
@@ -483,23 +513,27 @@ func handleHealthCheck(ctx context.Context, client jf.Client) (*mcp.CallToolResu
 	go func() { defer wg.Done(); storageErr = client.Get(ctx, "/System/Info/Storage", nil, &storageInfo) }()
 	wg.Wait()
 
-	overallStatus := "healthy"
+	overallStatus := "ok"
 	report := map[string]any{}
 
 	if sysInfoErr == nil {
-		osName := jf.GetString(sysInfo, "OperatingSystem")
-		if osName == "" {
-			osName = jf.GetString(sysInfo, "OperatingSystemDisplayName")
-		}
 		serverSection := map[string]any{
-			"version":              jf.GetString(sysInfo, "Version"),
-			"server_name":          jf.GetString(sysInfo, "ServerName"),
-			"os":                   osName,
-			"has_pending_restart":  jf.GetBool(sysInfo, "HasPendingRestart"),
-			"has_update_available": jf.GetBool(sysInfo, "HasUpdateAvailable"),
+			"version":             jf.GetString(sysInfo, "Version"),
+			"server_name":         jf.GetString(sysInfo, "ServerName"),
+			"has_pending_restart": jf.GetBool(sysInfo, "HasPendingRestart"),
 		}
 		if jf.GetBool(sysInfo, "HasPendingRestart") {
 			overallStatus = "warnings"
+		}
+		serverSection["minimum_supported_version"] = jf.MinSupportedVersion.String()
+		if v, err := jf.ParseServerVersion(jf.GetString(sysInfo, "Version")); err == nil {
+			serverSection["supported"] = v.Supported()
+			if !v.Supported() {
+				serverSection["note"] = fmt.Sprintf("Jellyfin %s is below the minimum supported version %s, so some tools may fail. Upgrade Jellyfin to %s or later.", v, jf.MinSupportedVersion, jf.MinSupportedVersion)
+				if overallStatus == "ok" {
+					overallStatus = "warnings"
+				}
+			}
 		}
 		report["server"] = serverSection
 	}
@@ -539,12 +573,12 @@ func handleHealthCheck(ctx context.Context, client jf.Client) (*mcp.CallToolResu
 				}
 			}
 		}
-		if !storageHealthy && overallStatus == "healthy" {
+		if !storageHealthy && overallStatus == "ok" {
 			overallStatus = "warnings"
 		}
 		report["storage"] = map[string]any{
-			"healthy": storageHealthy,
-			"mounts":  mountSummary,
+			"ok":     storageHealthy,
+			"mounts": mountSummary,
 		}
 	}
 
@@ -561,7 +595,7 @@ func handleHealthCheck(ctx context.Context, client jf.Client) (*mcp.CallToolResu
 				status := jf.GetString(le, "Status")
 				if status != "" && status != "Completed" && status != "Aborted" {
 					failedTasks = append(failedTasks, fmt.Sprintf("%s (%s)", name, status))
-					if overallStatus == "healthy" {
+					if overallStatus == "ok" {
 						overallStatus = "warnings"
 					}
 				}
@@ -575,24 +609,30 @@ func handleHealthCheck(ctx context.Context, client jf.Client) (*mcp.CallToolResu
 
 	if pluginsErr == nil {
 		needsRestart := make([]string, 0)
+		failed := make([]string, 0)
 		disabled := make([]string, 0)
 		for _, p := range plugins {
 			name := jf.GetString(p, "Name")
-			status := jf.GetString(p, "Status")
 			version := jf.GetString(p, "Version")
-			if status == "Restart" || status == "Superseded" {
+			// Jellyfin's PluginStatus enum carries both spellings of
+			// Superseded, and Malfunctioned and NotSupported are the plugins
+			// that failed to load.
+			switch jf.GetString(p, "Status") {
+			case "Restart", "Superseded", "Superceded":
 				needsRestart = append(needsRestart, fmt.Sprintf("%s (%s)", name, version))
-				if overallStatus == "healthy" {
-					overallStatus = "warnings"
-				}
-			}
-			if status == "Disabled" {
+			case "Malfunctioned", "NotSupported":
+				failed = append(failed, fmt.Sprintf("%s (%s)", name, version))
+			case "Disabled":
 				disabled = append(disabled, name)
 			}
 		}
+		if (len(needsRestart) > 0 || len(failed) > 0) && overallStatus == "ok" {
+			overallStatus = "warnings"
+		}
 		report["plugins"] = map[string]any{
-			"needs_restart": needsRestart,
-			"disabled":      disabled,
+			"needs_restart":  needsRestart,
+			"failed_to_load": failed,
+			"disabled":       disabled,
 		}
 	}
 
@@ -612,30 +652,27 @@ func handleHealthCheck(ctx context.Context, client jf.Client) (*mcp.CallToolResu
 		if latestLog != "" {
 			params := url.Values{"name": {latestLog}}
 			if logContent, err := client.GetRaw(ctx, "/System/Logs/Log", params); err == nil {
-				logLines := strings.Split(logContent, "\n")
-				var warnCount, errCount int
-				var allIssues []string
-				for _, line := range logLines {
-					if strings.Contains(line, "[WRN]") {
-						warnCount++
-						allIssues = append(allIssues, jf.Truncate(line, jf.OverviewMaxLen))
-					} else if strings.Contains(line, "[ERR]") {
-						errCount++
-						if overallStatus != "errors" {
-							overallStatus = "errors"
-						}
-						allIssues = append(allIssues, jf.Truncate(line, jf.OverviewMaxLen))
+				// Errors and warnings are sampled separately, so frequent
+				// warnings cannot push the errors out of the sample. An
+				// error's sample line carries its exception message.
+				var errs, warns []string
+				for _, e := range jf.ParseServerLog(logContent) {
+					switch {
+					case e.IsError():
+						errs = append(errs, truncateAtWord(e.Message(), logIssueMaxLen))
+					case e.IsWarning():
+						warns = append(warns, truncateAtWord(e.Message(), logIssueMaxLen))
 					}
 				}
-				lastIssues := allIssues
-				if len(lastIssues) > jf.HealthCheckMaxIssues {
-					lastIssues = lastIssues[len(lastIssues)-jf.HealthCheckMaxIssues:]
+				if len(errs) > 0 {
+					overallStatus = "errors"
 				}
 				report["recent_log_issues"] = map[string]any{
-					"log_file":    latestLog,
-					"warnings":    warnCount,
-					"errors":      errCount,
-					"last_issues": lastIssues,
+					"log_file":      latestLog,
+					"warnings":      len(warns),
+					"errors":        len(errs),
+					"last_errors":   lastN(errs, jf.HealthCheckMaxIssues),
+					"last_warnings": lastN(warns, jf.HealthCheckMaxIssues),
 				}
 			}
 		}
@@ -656,11 +693,10 @@ func handleHealthCheck(ctx context.Context, client jf.Client) (*mcp.CallToolResu
 			}
 			if latestBackup != nil {
 				backupHealthy := true
-				backupDate := jf.Truncate(latestBackupDate, jf.DateOnlyLen)
-				if parsed, err := time.Parse(jf.DateOnlyFormat, backupDate); err == nil {
-					ageDays := int(time.Since(parsed).Hours() / 24)
+				if created, ok := jf.ParseTime(latestBackupDate); ok {
+					ageDays := int(time.Since(created).Hours() / 24)
 					backupSection := map[string]any{
-						"last_backup":          backupDate,
+						"last_backup":          jf.LocalDate(latestBackupDate),
 						"last_backup_age_days": ageDays,
 					}
 					if version := jf.GetString(latestBackup, "ServerVersion"); version != "" {
@@ -668,24 +704,177 @@ func handleHealthCheck(ctx context.Context, client jf.Client) (*mcp.CallToolResu
 					}
 					if ageDays > jf.BackupStaleDays {
 						backupHealthy = false
-						if overallStatus == "healthy" {
+						if overallStatus == "ok" {
 							overallStatus = "warnings"
 						}
 					}
-					backupSection["healthy"] = backupHealthy
+					backupSection["ok"] = backupHealthy
 					report["backups"] = backupSection
 				}
 			}
 		} else {
-			report["backups"] = map[string]any{"healthy": false, "note": "no backups found"}
-			if overallStatus == "healthy" {
+			report["backups"] = map[string]any{"ok": false, "note": "no backups found"}
+			if overallStatus == "ok" {
 				overallStatus = "warnings"
 			}
 		}
 	} else {
-		report["backups"] = map[string]any{"note": "backup API not available (requires Jellyfin 10.11+)"}
+		report["backups"] = map[string]any{"error": fmt.Sprintf("listing backups failed: %v", backupsErr)}
 	}
 
+	// A section whose request failed is reported as such, and the status is
+	// then unknown rather than ok, because what failed was not checked.
+	for _, section := range []struct {
+		name string
+		err  error
+	}{{"server", sysInfoErr}, {"storage", storageErr}, {"tasks", tasksErr}, {"plugins", pluginsErr}, {"logs", logsErr}, {"backups", backupsErr}} {
+		if section.err == nil {
+			continue
+		}
+		if _, ok := report[section.name]; !ok {
+			report[section.name] = map[string]any{"error": section.err.Error()}
+		}
+		if overallStatus == "ok" {
+			overallStatus = "unknown"
+		}
+	}
 	report["status"] = overallStatus
-	return jf.TextResult(fmt.Sprintf("Health check — %s:\n\n%s", overallStatus, jf.FormatJSON(report))), nil, nil
+	return jf.TextResult(fmt.Sprintf("Health check, status %s:\n\n%s", overallStatus, jf.FormatJSON(report))), nil, nil
+}
+
+// logIssueMaxLen bounds a log line in a health check, long enough to keep
+// the exception message that follows the logger name.
+const logIssueMaxLen = 400
+
+// truncateAtWord shortens s to at most max characters, ending at a word
+// boundary when one falls in the last quarter, and marks the cut.
+func truncateAtWord(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	cut := max
+	if i := strings.LastIndex(s[:max], " "); i > max*3/4 {
+		cut = i
+	}
+	return s[:cut] + "…"
+}
+
+// handleLogFile reads one server log as entries and returns the newest that
+// match the filters, as many as the limit and the size budget allow, oldest
+// first. When entries are left out, the result gives the max_date that reaches
+// them.
+func handleLogFile(ctx context.Context, client jf.Client, args jf.SystemInfoInput) (*mcp.CallToolResult, any, error) {
+	if args.Name == "" {
+		return jf.ErrResult("name is required for log_file. Use 'logs' action to list available log files."), nil, nil
+	}
+	severity := strings.ToLower(args.Severity)
+	if severity == "" {
+		severity = "all"
+	}
+	if !slices.Contains([]string{"all", "warn", "error", "warn+error"}, severity) {
+		return jf.ErrResult("severity %q is not valid for log_file. Use all, warn, error, or warn+error.", args.Severity), nil, nil
+	}
+	var filters []string
+	if severity != "all" {
+		filters = append(filters, "severity "+severity)
+	}
+	var minT, maxT time.Time
+	if args.MinDate != "" {
+		t, _, err := parseDateArg("min_date", args.MinDate)
+		if err != nil {
+			return jf.ErrResult("%v", err), nil, nil
+		}
+		minT = t
+		filters = append(filters, "since "+args.MinDate)
+	}
+	if args.MaxDate != "" {
+		t, err := parseMaxDateArg("max_date", args.MaxDate)
+		if err != nil {
+			return jf.ErrResult("%v", err), nil, nil
+		}
+		maxT = t
+		filters = append(filters, "until "+args.MaxDate)
+	}
+	if !minT.IsZero() && !maxT.IsZero() && minT.After(maxT) {
+		return jf.ErrResult("min_date (%s) is later than max_date (%s)", args.MinDate, args.MaxDate), nil, nil
+	}
+	contains := strings.TrimSpace(args.Contains)
+	if contains != "" {
+		filters = append(filters, fmt.Sprintf("containing %q", contains))
+	}
+
+	content, err := client.GetRaw(ctx, "/System/Logs/Log", url.Values{"name": {args.Name}})
+	if err != nil {
+		return jf.ErrResult("Jellyfin API error: %v", err), nil, nil
+	}
+	needle := strings.ToLower(contains)
+	var matches []jf.LogEntry
+	untimed := 0
+	for _, e := range jf.ParseServerLog(content) {
+		switch {
+		case severity == "warn" && !e.IsWarning(),
+			severity == "error" && !e.IsError(),
+			severity == "warn+error" && !e.IsWarning() && !e.IsError():
+			continue
+		}
+		if !minT.IsZero() || !maxT.IsZero() {
+			if e.Time.IsZero() {
+				untimed++
+				continue
+			}
+			if (!minT.IsZero() && e.Time.Before(minT)) || (!maxT.IsZero() && e.Time.After(maxT)) {
+				continue
+			}
+		}
+		if needle != "" && !strings.Contains(strings.ToLower(e.Header+"\n"+strings.Join(e.Detail, "\n")), needle) {
+			continue
+		}
+		matches = append(matches, e)
+	}
+
+	scope := ""
+	if len(filters) > 0 {
+		scope = " (" + strings.Join(filters, ", ") + ")"
+	}
+	untimedNote := ""
+	if untimed > 0 {
+		untimedNote = fmt.Sprintf(" %d %s no time in the layout Jellyfin writes by default, so the date filters left %s out.", untimed, plural(untimed, "entry has", "entries have"), plural(untimed, "it", "them"))
+	}
+	if len(matches) == 0 {
+		return jf.TextResult(fmt.Sprintf("Log file '%s'%s: no entries match.%s", args.Name, scope, untimedNote)), nil, nil
+	}
+	limit := jf.ClampInt(args.Limit, jf.LogFileDefaultEntries, jf.LogFileMaxEntries)
+	var shown []string
+	size, oldest, full := 0, len(matches), false
+	for i := len(matches) - 1; i >= 0 && len(shown) < limit; i-- {
+		text := jf.Truncate(matches[i].Text(jf.LogFileStackFrames), jf.LogFileMaxChars)
+		if len(shown) > 0 && size+len(text) > jf.LogFileMaxChars {
+			full = true
+			break
+		}
+		shown = append(shown, text)
+		size += len(text) + 1
+		oldest = i
+	}
+	slices.Reverse(shown)
+	msg := fmt.Sprintf("Log file '%s'%s: %d %s; showing the newest %d, oldest first.", args.Name, scope, len(matches), plural(len(matches), "entry matches", "entries match"), len(shown))
+	if left := oldest; left > 0 {
+		why := fmt.Sprintf("the limit is %d", limit)
+		if full {
+			why = "more would not fit in one result"
+		}
+		msg += fmt.Sprintf(" The %d earlier %s left out because %s.", left, plural(left, "entry is", "entries are"), why)
+		if t := matches[oldest].Time; !t.IsZero() {
+			msg += fmt.Sprintf(" To read them, call again with max_date=%s, one millisecond before the oldest entry shown.", t.Add(-time.Millisecond).In(time.Local).Format("2006-01-02T15:04:05.000Z07:00"))
+		}
+	}
+	return jf.TextResult(msg + untimedNote + "\n\n" + strings.Join(shown, "\n")), nil, nil
+}
+
+// lastN returns the last n entries of s, never nil.
+func lastN(s []string, n int) []string {
+	if len(s) > n {
+		s = s[len(s)-n:]
+	}
+	return append([]string{}, s...)
 }

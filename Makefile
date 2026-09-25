@@ -6,8 +6,15 @@ GO_SRC := $(shell find internal -name '*.go') main.go go.mod go.sum
 
 GO_BUILD_FLAGS := -trimpath -ldflags="-s -w -X github.com/jaredtrent/jellyfin-mcp/internal/server.version=$(VERSION)"
 
-.PHONY: build build-local test vet lint check list-binaries version-sync npm-publish release \
+.PHONY: build build-local dist test vet lint check list-binaries version-sync npm-publish \
         clean version-bump
+
+# Release archives as os/arch/name. The names carry no version, so the link
+# https://github.com/jaredtrent/jellyfin-mcp/releases/latest/download/<archive>
+# that the README's install commands use always reaches the newest release. The
+# archives carry no macOS file attributes, which tar on Linux warns about.
+DIST_TARGETS := linux/amd64/linux_x64 linux/arm64/linux_arm64 darwin/arm64/macOS_apple-silicon \
+        darwin/amd64/macOS_intel windows/amd64/windows_x64
 
 ## build: Compile Go binary for linux/amd64 (npm package / MetaMCP target)
 build: $(BIN_TARGET)
@@ -20,6 +27,23 @@ $(BIN_TARGET): $(GO_SRC)
 build-local:
 	mkdir -p build
 	go build $(GO_BUILD_FLAGS) -o build/$(BINARY) .
+
+## dist: Build the release archives for every platform into dist/, with checksums.txt
+dist:
+	rm -rf dist && mkdir -p dist
+	@for t in $(DIST_TARGETS); do \
+		os=$${t%%/*}; rest=$${t#*/}; arch=$${rest%%/*}; name=$${rest#*/}; \
+		echo "Building $(BINARY)_$$name"; \
+		if [ "$$os" = windows ]; then \
+			CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build $(GO_BUILD_FLAGS) -o dist/$(BINARY).exe . && \
+			(cd dist && zip -q -X $(BINARY)_$$name.zip $(BINARY).exe && rm $(BINARY).exe) || exit 1; \
+		else \
+			CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build $(GO_BUILD_FLAGS) -o dist/$(BINARY) . && \
+			COPYFILE_DISABLE=1 tar --no-xattrs -czf dist/$(BINARY)_$$name.tar.gz -C dist $(BINARY) && rm dist/$(BINARY) || exit 1; \
+		fi; \
+	done
+	cd dist && shasum -a 256 $(BINARY)_* > checksums.txt
+	@echo "Built version $(VERSION):" && cat dist/checksums.txt
 
 ## test: Run all tests
 test:
@@ -39,9 +63,9 @@ check: vet lint test
 ## list-binaries: Show built binaries
 list-binaries:
 	@echo "NPM binary:"
-	@ls -lh $(BIN_TARGET) 2>/dev/null || echo "  (not built — run 'make build')"
+	@ls -lh $(BIN_TARGET) 2>/dev/null || echo "  (not built; run 'make build')"
 	@echo "Local binary:"
-	@ls -lh build/$(BINARY) 2>/dev/null || echo "  (not built — run 'make build-local')"
+	@ls -lh build/$(BINARY) 2>/dev/null || echo "  (not built; run 'make build-local')"
 
 ## version-sync: Update package.json to match npm/VERSION
 version-sync:
@@ -59,11 +83,6 @@ npm-publish:
 	@echo "Publishing @jaredtrent/jellyfin-mcp v$(VERSION)..."
 	cd $(NPM_DIR)/jellyfin-mcp && npm publish --userconfig=../.npmrc
 	@echo "Published."
-
-## release: Full workflow — check, clean, sync version, build, tag, publish
-release: check clean version-sync build npm-publish
-	git tag -a "v$(VERSION)" -m "Release $(VERSION)"
-	git push origin "v$(VERSION)"
 
 ## clean: Remove built binaries
 clean:

@@ -1,12 +1,12 @@
 # Resources
 
-13 MCP resources providing live data from the Jellyfin server.
+Thirteen resources that read live data from the Jellyfin server without a tool call, and eleven static reference guides.
 
 ## Fixed resources
 
 | URI | Description |
 |-----|-------------|
-| `jellyfin://server/info` | Server name, version, OS, and network details |
+| `jellyfin://server/info` | Server name, version, ID, whether the startup wizard is complete, and the local address |
 | `jellyfin://libraries` | All media libraries with IDs, collection types, and paths |
 | `jellyfin://sessions` | All connected client sessions with playback status |
 | `jellyfin://sessions/now-playing` | Sessions with active playback only |
@@ -27,15 +27,18 @@
 
 ## Reference guides
 
+Static Markdown guides, one file each under [guides](guides), that the AI reads to help with setup and troubleshooting.
+
 | URI | Description |
 |-----|-------------|
-| `jellyfin://guides/transcoding` | Hardware transcoding: Intel QSV, VAAPI, NVENC, Docker GPU passthrough |
-| `jellyfin://guides/file-naming` | Movie, TV, and music file naming for proper metadata matching |
-| `jellyfin://guides/remote-access` | Reverse proxy, VPN, and port forwarding setup |
-| `jellyfin://guides/troubleshooting` | Common issues and solutions for scans, metadata, playback, and database |
-| `jellyfin://guides/library-setup` | Library organization, content separation, storage, and Docker volumes |
-| `jellyfin://guides/docker` | Docker volume mounts, GPU passthrough, permissions, compose files |
-| `jellyfin://guides/users-and-access` | User management, parental controls, per-library access |
-| `jellyfin://guides/plugins` | Plugin repositories, recommended plugins, and configuration |
-| `jellyfin://guides/migration` | Migrating from Plex or Emby: library setup, metadata, watch history |
-| `jellyfin://guides/performance` | Transcoding optimization, database maintenance, cache, and networking |
+| `jellyfin://guides/transcoding` | Hardware transcoding: which method fits which GPU, Docker GPU access, encoding settings |
+| `jellyfin://guides/file-naming` | Movie, show, music, and book file naming for metadata matching |
+| `jellyfin://guides/remote-access` | Reverse proxy, VPN, port forwarding, and the Known Proxies setting |
+| `jellyfin://guides/troubleshooting` | Failed scans, wrong metadata, playback failures, locked accounts, database errors, and reading the log |
+| `jellyfin://guides/library-setup` | Library organization by content type, storage placement, network shares, Docker volumes |
+| `jellyfin://guides/docker` | Compose file, volumes, GPU access, permissions, networking, and the upgrade to Jellyfin 12 |
+| `jellyfin://guides/users-and-access` | Accounts, per-library access, parental controls, and failed-login lockouts |
+| `jellyfin://guides/plugins` | Plugin repositories, the Jellyfin 12 plugin upgrade, and plugins by use case |
+| `jellyfin://guides/migration` | Migrating from Plex or Emby: library setup, metadata, watch history, plugin equivalents |
+| `jellyfin://guides/performance` | Transcoding settings, needless transcodes, database placement, cache tasks, storage |
+| `jellyfin://guides/syncplay` | SyncPlay watch-together: supported clients, user access, network requirements, troubleshooting |

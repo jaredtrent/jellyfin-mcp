@@ -2,101 +2,123 @@ package resources
 
 import (
 	"context"
+	"embed"
+	"fmt"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-func registerGuides(server *mcp.Server) {
-	guides := []struct {
-		URI, Name, Title, Description, Content string
-	}{
-		{
-			URI:         "jellyfin://guides/transcoding",
-			Name:        "Transcoding Setup Guide",
-			Title:       "Transcoding",
-			Description: "Hardware transcoding configuration: Intel QSV, VAAPI, NVENC, Docker GPU passthrough",
-			Content:     transcodingGuide,
-		},
-		{
-			URI:         "jellyfin://guides/file-naming",
-			Name:        "File Naming Conventions",
-			Title:       "File Naming",
-			Description: "Movie, TV, and music file naming standards for proper metadata matching",
-			Content:     fileNamingGuide,
-		},
-		{
-			URI:         "jellyfin://guides/remote-access",
-			Name:        "Remote Access Setup",
-			Title:       "Remote Access",
-			Description: "Reverse proxy, VPN, and port forwarding options for accessing Jellyfin remotely",
-			Content:     remoteAccessGuide,
-		},
-		{
-			URI:         "jellyfin://guides/troubleshooting",
-			Name:        "Troubleshooting Guide",
-			Title:       "Troubleshooting",
-			Description: "Common issues and solutions: library scans, metadata, playback, database recovery",
-			Content:     troubleshootingGuide,
-		},
-		{
-			URI:         "jellyfin://guides/library-setup",
-			Name:        "Library Setup Guide",
-			Title:       "Library Setup",
-			Description: "Library organization, content separation, storage, and Docker volume configuration",
-			Content:     librarySetupGuide,
-		},
-		{
-			URI:         "jellyfin://guides/docker",
-			Name:        "Docker Deployment Guide",
-			Title:       "Docker",
-			Description: "Docker volume mounts, GPU passthrough, permissions, compose files, and networking",
-			Content:     dockerGuide,
-		},
-		{
-			URI:         "jellyfin://guides/users-and-access",
-			Name:        "Users and Access Control Guide",
-			Title:       "Users & Access",
-			Description: "User management, parental controls, per-library access, and invitation tools",
-			Content:     usersAccessGuide,
-		},
-		{
-			URI:         "jellyfin://guides/plugins",
-			Name:        "Plugin Ecosystem Guide",
-			Title:       "Plugins",
-			Description: "Plugin repositories, recommended plugins, and configuration tips",
-			Content:     pluginsGuide,
-		},
-		{
-			URI:         "jellyfin://guides/migration",
-			Name:        "Migration Guide",
-			Title:       "Migration",
-			Description: "Migrating from Plex or Emby to Jellyfin: library setup, metadata, plugins, and watch history",
-			Content:     migrationGuide,
-		},
-		{
-			URI:         "jellyfin://guides/performance",
-			Name:        "Performance Tuning Guide",
-			Title:       "Performance",
-			Description: "Hardware transcoding optimization, database maintenance, cache sizing, and network tuning",
-			Content:     performanceGuide,
-		},
-	}
+// guideFiles holds the reference guides as Markdown, one file per guide, so
+// the prose is edited as prose rather than as Go string literals.
+//
+//go:embed guides/*.md
+var guideFiles embed.FS
 
+// guides lists every reference guide in the order clients see it. Each File
+// names the Markdown file under guides/ that holds the guide's text.
+var guides = []struct {
+	URI, Name, Title, Description, File string
+}{
+	{
+		URI:         "jellyfin://guides/transcoding",
+		Name:        "Transcoding Setup Guide",
+		Title:       "Transcoding",
+		Description: "Hardware transcoding setup: which acceleration method fits which GPU, Docker GPU access, and the encoding settings that matter",
+		File:        "transcoding.md",
+	},
+	{
+		URI:         "jellyfin://guides/file-naming",
+		Name:        "File Naming Conventions",
+		Title:       "File Naming",
+		Description: "Movie, show, music, and book file naming that Jellyfin matches to the right metadata",
+		File:        "file-naming.md",
+	},
+	{
+		URI:         "jellyfin://guides/remote-access",
+		Name:        "Remote Access Setup",
+		Title:       "Remote Access",
+		Description: "Reverse proxy, VPN, and port forwarding options for reaching Jellyfin from outside the home network, and the Known Proxies setting",
+		File:        "remote-access.md",
+	},
+	{
+		URI:         "jellyfin://guides/troubleshooting",
+		Name:        "Troubleshooting Guide",
+		Title:       "Troubleshooting",
+		Description: "Fixes for failed scans, wrong metadata, playback failures, locked accounts, and database errors, and how to read the server log",
+		File:        "troubleshooting.md",
+	},
+	{
+		URI:         "jellyfin://guides/library-setup",
+		Name:        "Library Setup Guide",
+		Title:       "Library Setup",
+		Description: "Library organization by content type, storage placement, network shares, and Docker volumes",
+		File:        "library-setup.md",
+	},
+	{
+		URI:         "jellyfin://guides/docker",
+		Name:        "Docker Deployment Guide",
+		Title:       "Docker",
+		Description: "Docker compose file, volumes, GPU access, permissions, networking, and the upgrade to Jellyfin 12",
+		File:        "docker.md",
+	},
+	{
+		URI:         "jellyfin://guides/users-and-access",
+		Name:        "Users and Access Control Guide",
+		Title:       "Users & Access",
+		Description: "User accounts, per-library access, parental controls, failed-login lockouts, and invitation tools",
+		File:        "users-and-access.md",
+	},
+	{
+		URI:         "jellyfin://guides/plugins",
+		Name:        "Plugins Guide",
+		Title:       "Plugins",
+		Description: "Plugin repositories, the Jellyfin 12 plugin upgrade, and which plugin to use for subtitles, metadata, reports, and intro skipping",
+		File:        "plugins.md",
+	},
+	{
+		URI:         "jellyfin://guides/migration",
+		Name:        "Migration Guide",
+		Title:       "Migration",
+		Description: "Migrating from Plex or Emby to Jellyfin: library setup, metadata, watch history, and plugin equivalents",
+		File:        "migration.md",
+	},
+	{
+		URI:         "jellyfin://guides/performance",
+		Name:        "Performance Tuning Guide",
+		Title:       "Performance",
+		Description: "Transcoding settings, needless transcodes, database placement, cache tasks, and storage for a fast server",
+		File:        "performance.md",
+	},
+	{
+		URI:         "jellyfin://guides/syncplay",
+		Name:        "SyncPlay Guide",
+		Title:       "SyncPlay",
+		Description: "SyncPlay watch-together groups: supported clients, user access, network requirements, and troubleshooting",
+		File:        "syncplay.md",
+	},
+}
+
+func registerGuides(server *mcp.Server) {
 	for _, g := range guides {
-		guide := g // capture
+		content, err := guideFiles.ReadFile("guides/" + g.File)
+		if err != nil {
+			panic(fmt.Sprintf("guide %s: %v", g.URI, err))
+		}
+		text := string(content)
+		uri := g.URI
 		server.AddResource(&mcp.Resource{
-			URI:         guide.URI,
-			Name:        guide.Name,
-			Title:       guide.Title,
-			Description: guide.Description,
+			URI:         uri,
+			Name:        g.Name,
+			Title:       g.Title,
+			Description: g.Description,
 			MIMEType:    "text/markdown",
 			Annotations: &mcp.Annotations{Audience: []mcp.Role{"assistant"}, Priority: 0.2},
 		}, func(_ context.Context, _ *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
 			return &mcp.ReadResourceResult{
 				Contents: []*mcp.ResourceContents{{
-					URI:      guide.URI,
+					URI:      uri,
 					MIMEType: "text/markdown",
-					Text:     guide.Content,
+					Text:     text,
 				}},
 			}, nil
 		})

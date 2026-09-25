@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"sort"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -38,26 +40,19 @@ func RegisterMediaTools(server *mcp.Server, client jf.Client, enabled func(strin
 					return jf.ErrResult("series_id is required for 'seasons' action. Use jellyfin_search with type 'Series' to find the series ID."), nil, nil
 				}
 				params := url.Values{
+					"UserId":           {userID},
 					"ParentId":         {args.SeriesID},
 					"IncludeItemTypes": {"Season"},
 					"Fields":           {"ChildCount"},
 				}
 				var result map[string]any
-				endpoint := fmt.Sprintf("/Users/%s/Items", jf.SanitizeID(userID))
-				if err := client.Get(ctx, endpoint, params, &result); err != nil {
+				if err := client.Get(ctx, "/Items", params, &result); err != nil {
 					return jf.ErrResult("Jellyfin API error: %v", err), nil, nil
 				}
 				rawItems := jf.ToSlice(result["Items"])
-				items := make([]map[string]any, 0, len(rawItems))
 				seasons := make([]jf.SeasonInfo, 0, len(rawItems))
 				for _, raw := range rawItems {
 					m := jf.ToMap(raw)
-					items = append(items, map[string]any{
-						"id":            jf.GetString(m, "Id"),
-						"name":          jf.GetString(m, "Name"),
-						"season_number": jf.GetInt(m, "IndexNumber"),
-						"episode_count": jf.GetInt(m, "ChildCount"),
-					})
 					seasons = append(seasons, jf.SeasonInfo{
 						ID:           jf.GetString(m, "Id"),
 						Name:         jf.GetString(m, "Name"),
@@ -65,26 +60,26 @@ func RegisterMediaTools(server *mcp.Server, client jf.Client, enabled func(strin
 						EpisodeCount: jf.GetInt(m, "ChildCount"),
 					})
 				}
-				return jf.TextResult(fmt.Sprintf("Found %d seasons:\n\n%s", len(items), jf.FormatJSON(items))), &jf.TVShowsOutput{Seasons: seasons}, nil
+				return nil, &jf.TVShowsOutput{Seasons: &seasons}, nil
 
 			case "episodes":
 				if args.SeriesID == "" {
 					return jf.ErrResult("series_id is required for 'episodes' action."), nil, nil
 				}
 				if args.SeasonNumber == nil {
-					return jf.ErrResult("season_number is required for 'episodes' action (e.g. 1 for Season 1)."), nil, nil
+					return jf.ErrResult("season_number is required for 'episodes' action (such as 1 for Season 1)."), nil, nil
 				}
 
 				jf.ReportProgress(ctx, req, 0, 2, "Finding season...")
 
 				// Find season by number
 				params := url.Values{
+					"UserId":           {userID},
 					"ParentId":         {args.SeriesID},
 					"IncludeItemTypes": {"Season"},
 				}
 				var seasonsResult map[string]any
-				endpoint := fmt.Sprintf("/Users/%s/Items", jf.SanitizeID(userID))
-				if err := client.Get(ctx, endpoint, params, &seasonsResult); err != nil {
+				if err := client.Get(ctx, "/Items", params, &seasonsResult); err != nil {
 					return jf.ErrResult("Jellyfin API error: %v", err), nil, nil
 				}
 				var seasonID string
@@ -96,70 +91,57 @@ func RegisterMediaTools(server *mcp.Server, client jf.Client, enabled func(strin
 					}
 				}
 				if seasonID == "" {
-					return jf.ErrResult("Season %d not found for this series.", *args.SeasonNumber), nil, nil
+					return jf.ErrResult("Season %d not found for this series. Use action 'seasons' to list its season numbers.", *args.SeasonNumber), nil, nil
 				}
 
 				jf.ReportProgress(ctx, req, 1, 2, "Fetching episodes...")
 
 				// Get episodes
 				params = url.Values{
+					"UserId":           {userID},
 					"ParentId":         {seasonID},
 					"IncludeItemTypes": {"Episode"},
-					"Fields":           {"Overview,CommunityRating,RunTimeTicks"},
+					"Fields":           {"Overview"},
 				}
 				var result map[string]any
-				endpoint = fmt.Sprintf("/Users/%s/Items", jf.SanitizeID(userID))
-				if err := client.Get(ctx, endpoint, params, &result); err != nil {
+				if err := client.Get(ctx, "/Items", params, &result); err != nil {
 					return jf.ErrResult("Jellyfin API error: %v", err), nil, nil
 				}
 				rawItems := jf.ToSlice(result["Items"])
-				items := make([]map[string]any, 0, len(rawItems))
 				episodes := make([]jf.EpisodeInfo, 0, len(rawItems))
 				for _, raw := range rawItems {
 					m := jf.ToMap(raw)
-					ep := map[string]any{
-						"id":             jf.GetString(m, "Id"),
-						"episode_number": jf.GetInt(m, "IndexNumber"),
-						"name":           jf.GetString(m, "Name"),
-					}
-					epInfo := jf.EpisodeInfo{
-						ID:            jf.GetString(m, "Id"),
-						Name:          jf.GetString(m, "Name"),
-						SeasonNumber:  *args.SeasonNumber,
-						EpisodeNumber: jf.GetInt(m, "IndexNumber"),
-					}
-					if ov := jf.GetString(m, "Overview"); ov != "" {
-						ep["overview"] = jf.Truncate(ov, jf.SummaryMaxLen)
-						epInfo.Overview = jf.Truncate(ov, jf.SummaryMaxLen)
-					}
-					if rt := jf.GetInt64(m, "RunTimeTicks"); rt > 0 {
-						ep["runtime_minutes"] = rt / jf.TicksPerMinute
-						epInfo.RuntimeMinutes = rt / jf.TicksPerMinute
-					}
-					if rating := jf.GetFloat(m, "CommunityRating"); rating > 0 {
-						ep["community_rating"] = rating
-						epInfo.CommunityRating = rating
-					}
-					items = append(items, ep)
-					episodes = append(episodes, epInfo)
+					item := jf.MediaItemFrom(m)
+					episodes = append(episodes, jf.EpisodeInfo{
+						ID:              item.ID,
+						Name:            item.Name,
+						SeasonNumber:    *args.SeasonNumber,
+						EpisodeNumber:   item.IndexNumber,
+						Overview:        jf.Truncate(item.Overview, jf.SummaryMaxLen),
+						CommunityRating: item.CommunityRating,
+						RuntimeMinutes:  item.RuntimeMinutes,
+						Played:          item.Played,
+						Progress:        item.Progress,
+						PremiereDate:    jf.Truncate(jf.GetString(m, "PremiereDate"), jf.DateOnlyLen),
+					})
 				}
-				return jf.TextResult(fmt.Sprintf("Season %d — %d episodes:\n\n%s", *args.SeasonNumber, len(items), jf.FormatJSON(items))), &jf.TVShowsOutput{Episodes: episodes}, nil
+				return nil, &jf.TVShowsOutput{Episodes: &episodes}, nil
 
 			case "next_up":
 				maxItems := jf.ClampInt(args.Limit, 100, jf.MaxLimitCap)
 				params := url.Values{
 					"UserId": {userID},
-					"Fields": {"Overview,ProductionYear"},
+					"Fields": {"Overview"},
 				}
 				if args.SeriesID != "" {
 					params.Set("SeriesId", args.SeriesID)
 				}
-				rawItems, _, err := jf.FetchAllPages(ctx, client, "/Shows/NextUp", params, maxItems)
+				rawItems, total, err := jf.FetchAllPages(ctx, client, "/Shows/NextUp", params, maxItems)
 				if err != nil {
 					return jf.ErrResult("Jellyfin API error: %v", err), nil, nil
 				}
-				items := jf.MapExtract(rawItems, jf.ExtractMediaItem)
-				return jf.TextResult(fmt.Sprintf("Next Up (%d episodes):\n\n%s", len(items), jf.FormatJSON(items))), &jf.TVShowsOutput{NextUp: jf.ToMediaItems(items)}, nil
+				items := jf.MediaItemsFrom(rawItems)
+				return nil, &jf.TVShowsOutput{NextUp: &items, Notes: moreNote(len(items), total, maxItems, "pass a series_id")}, nil
 
 			default:
 				return jf.ErrResult("Invalid action '%s'. Valid actions: seasons, episodes, next_up", args.Action), nil, nil
@@ -206,7 +188,7 @@ func RegisterMediaTools(server *mcp.Server, client jf.Client, enabled func(strin
 				if err != nil {
 					return jf.ErrResult("Jellyfin API error: %v", err), nil, nil
 				}
-				items := jf.MapExtract(rawItems, jf.ExtractMediaItem)
+				items := jf.MediaItemsFrom(rawItems)
 				msg := fmt.Sprintf("Found %d artists", len(items))
 				if total > len(items) {
 					msg += fmt.Sprintf(" (of %d total)", total)
@@ -214,19 +196,7 @@ func RegisterMediaTools(server *mcp.Server, client jf.Client, enabled func(strin
 				return jf.TextResult(fmt.Sprintf("%s:\n\n%s", msg, jf.FormatJSON(items))), nil, nil
 
 			case "genres":
-				maxItems := jf.ClampInt(args.Limit, 200, jf.MaxLimitCap)
-				params := url.Values{
-					"UserId": {userID},
-				}
-				if args.Query != "" {
-					params.Set("SearchTerm", args.Query)
-				}
-				rawItems, _, err := jf.FetchAllPages(ctx, client, "/MusicGenres", params, maxItems)
-				if err != nil {
-					return jf.ErrResult("Jellyfin API error: %v", err), nil, nil
-				}
-				items := jf.MapExtract(rawItems, jf.ExtractMediaItem)
-				return jf.TextResult(fmt.Sprintf("Music genres (%d):\n\n%s", len(items), jf.FormatJSON(items))), nil, nil
+				return handleMusicGenres(ctx, client, userID, args)
 
 			case "instant_mix":
 				if args.ItemID == "" {
@@ -241,7 +211,7 @@ func RegisterMediaTools(server *mcp.Server, client jf.Client, enabled func(strin
 				if err := client.Get(ctx, endpoint, params, &result); err != nil {
 					return jf.ErrResult("Jellyfin API error: %v", err), nil, nil
 				}
-				items := jf.ExtractItemList(result)
+				items := jf.ItemsFrom(result)
 				return jf.TextResult(fmt.Sprintf("Instant mix (%d tracks):\n\n%s", len(items), jf.FormatJSON(items))), nil, nil
 
 			default:
@@ -272,17 +242,24 @@ func RegisterMediaTools(server *mcp.Server, client jf.Client, enabled func(strin
 			switch args.Action {
 			case "persons":
 				maxItems := jf.ClampInt(args.Limit, 200, jf.MaxLimitCap)
+				// Jellyfin 10.11's /Persons takes no StartIndex, so it cannot be
+				// paged; a single request asks for the whole limit.
 				params := url.Values{
 					"UserId": {userID},
+					"Limit":  {fmt.Sprintf("%d", maxItems)},
+					// Jellyfin 12 lists music credits among persons; on every
+					// version they belong to the artists actions.
+					"ExcludePersonTypes": {"Artist,AlbumArtist"},
 				}
 				if args.Query != "" {
 					params.Set("SearchTerm", args.Query)
 				}
-				rawItems, total, err := jf.FetchAllPages(ctx, client, "/Persons", params, maxItems)
-				if err != nil {
+				var result map[string]any
+				if err := client.Get(ctx, "/Persons", params, &result); err != nil {
 					return jf.ErrResult("Jellyfin API error: %v", err), nil, nil
 				}
-				items := jf.MapExtract(rawItems, jf.ExtractMediaItem)
+				items := jf.ItemsFrom(result)
+				total := jf.GetInt(result, "TotalRecordCount")
 				msg := fmt.Sprintf("Found %d persons", len(items))
 				if total > len(items) {
 					msg += fmt.Sprintf(" (of %d total)", total)
@@ -301,7 +278,7 @@ func RegisterMediaTools(server *mcp.Server, client jf.Client, enabled func(strin
 				if err != nil {
 					return jf.ErrResult("Jellyfin API error: %v", err), nil, nil
 				}
-				items := jf.MapExtract(rawItems, jf.ExtractMediaItem)
+				items := jf.MediaItemsFrom(rawItems)
 				msg := fmt.Sprintf("Found %d studios", len(items))
 				if total > len(items) {
 					msg += fmt.Sprintf(" (of %d total)", total)
@@ -313,4 +290,89 @@ func RegisterMediaTools(server *mcp.Server, client jf.Client, enabled func(strin
 			}
 		})
 	}
+}
+
+// handleMusicGenres lists the music genres of every music and music-video
+// library the user can see. /Genres returns music genres only when ParentId
+// names such a library; without it the endpoint returns video genres. The
+// libraries come from the user's views, which apply the user's library access
+// and are never grouped for these collection types, so each view is the
+// library itself. A genre item is global by name, so a genre found in several
+// libraries carries the same Id in each.
+func handleMusicGenres(ctx context.Context, client jf.Client, userID string, args jf.MusicInput) (*mcp.CallToolResult, any, error) {
+	maxItems := jf.ClampInt(args.Limit, 200, jf.MaxLimitCap)
+	var views map[string]any
+	if err := client.Get(ctx, "/UserViews", url.Values{"UserId": {userID}}, &views); err != nil {
+		return jf.ErrResult("Jellyfin API error: %v", err), nil, nil
+	}
+	var libraryIDs []string
+	for _, raw := range jf.ToSlice(views["Items"]) {
+		view := jf.ToMap(raw)
+		switch jf.GetString(view, "CollectionType") {
+		case "music", "musicvideos":
+			if id := jf.GetString(view, "Id"); id != "" {
+				libraryIDs = append(libraryIDs, id)
+			}
+		}
+	}
+	if len(libraryIDs) == 0 {
+		return jf.TextResult("No music or music-video library is available to this user, so there are no music genres to list."), nil, nil
+	}
+
+	seen := make(map[string]bool)
+	var genres []map[string]any
+	cut := false
+	for _, libraryID := range libraryIDs {
+		params := url.Values{
+			"UserId":   {userID},
+			"ParentId": {libraryID},
+		}
+		if args.Query != "" {
+			params.Set("SearchTerm", args.Query)
+		}
+		rawItems, total, err := jf.FetchAllPages(ctx, client, "/Genres", params, maxItems)
+		if err != nil {
+			return jf.ErrResult("Jellyfin API error: %v", err), nil, nil
+		}
+		cut = cut || total > len(rawItems)
+		for _, raw := range rawItems {
+			m := jf.ToMap(raw)
+			if m == nil {
+				continue
+			}
+			key := jf.GetString(m, "Id")
+			if key == "" {
+				key = "name:" + strings.ToLower(jf.GetString(m, "Name"))
+			}
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			genres = append(genres, m)
+		}
+	}
+	sort.SliceStable(genres, func(i, j int) bool {
+		a, b := jf.GetString(genres[i], "Name"), jf.GetString(genres[j], "Name")
+		if la, lb := strings.ToLower(a), strings.ToLower(b); la != lb {
+			return la < lb
+		}
+		return a < b
+	})
+	if len(genres) > maxItems {
+		genres = genres[:maxItems]
+		cut = true
+	}
+	items := make([]jf.MediaItem, 0, len(genres))
+	for _, g := range genres {
+		items = append(items, jf.MediaItemFrom(g))
+	}
+	note := ""
+	if cut {
+		note = " More genres match than are shown; narrow with query"
+		if maxItems < jf.MaxLimitCap {
+			note += fmt.Sprintf(", or increase limit (currently %d, at most %d)", maxItems, jf.MaxLimitCap)
+		}
+		note += "."
+	}
+	return jf.TextResult(fmt.Sprintf("Music genres (%d):%s\n\n%s", len(items), note, jf.FormatJSON(items))), nil, nil
 }

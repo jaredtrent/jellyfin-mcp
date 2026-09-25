@@ -2,160 +2,158 @@
 
 [![CI](https://github.com/jaredtrent/jellyfin-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/jaredtrent/jellyfin-mcp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Go](https://img.shields.io/badge/Go-1.25+-00ADD8.svg)](https://go.dev)
+[![Go](https://img.shields.io/badge/Go-1.26+-00ADD8.svg)](https://go.dev)
 [![npm](https://img.shields.io/npm/v/@jaredtrent/jellyfin-mcp)](https://www.npmjs.com/package/@jaredtrent/jellyfin-mcp)
 
-MCP server that connects AI assistants to your [Jellyfin](https://jellyfin.org) media server — 31 tools, 13 live resources, and 18 guided workflows. Search your library, control playback, manage metadata, find subtitles, troubleshoot your server, and more.
+An MCP server that connects an AI assistant to your [Jellyfin](https://jellyfin.org) media server, with 31 tools, 13 live resources, and 19 guided workflows.
 
-This project is not associated with the official Jellyfish project or team. It's a fan project.
+Once connected, the assistant searches your library, starts playback on your devices, fixes metadata, finds subtitles, and reads the server's logs when something goes wrong. It works from your own library, so a recommendation is always something you can play.
 
-**[Setup](#setup)** · **[Transport](#transport)** · **[Options](#options)** · **[MCP capabilities](#mcp-capabilities)** · **[Important notes](#important-notes)**
+jellyfin-mcp is a fan project. It isn't associated with the Jellyfin project or its team.
 
-## What can it do?
+**[Setup](#setup)** · **[Transport](#transport)** · **[Options](#options)** · **[MCP capabilities](#mcp-capabilities)** · **[Caveats](#caveats)**
 
-- **Find and play media** — search your library and start playback on any connected client
-- **Browse and filter** — by genre, year, studio, actor, rating, played status, and more
-- **Recommendations** — personalized suggestions from your own library, not external sites
-- **Control playback** — play, pause, seek, stop, volume, next/previous on any device
-- **Playlists and collections** — create, manage, deduplicate playlists and box set collections
-- **Music** — browse artists, albums, genres; generate instant mix playlists
-- **Subtitles** — search, download, and audit missing subtitles across your library
-- **Metadata management** — fix titles, genres, ratings, images; batch updates; re-identify items
-- **Troubleshoot your server** — read server logs, check failed tasks, diagnose playback issues
-- **Server admin** — user management, library scans, scheduled tasks, plugins, devices, backups
-- **Analytics** — watch history, codec reports, duplicate detection, library stats
-- **Live TV and DVR** — guide data, channels, recordings, series timers
-- **SyncPlay** — synchronized group watching sessions
+## What It Does
 
-### Built-in knowledge
+- **Find and play media**: Search the library and start playback on any connected client.
+- **Browse and filter**: Narrow by genre, year, studio, actor, rating, played status, and more.
+- **Recommend**: Suggest titles from your own library, never from an external site.
+- **Control playback**: Play, pause, seek, stop, set the volume, and skip on any device.
+- **Manage playlists and collections**: Create, edit, and deduplicate playlists and box sets.
+- **Play music**: Browse artists, albums, and genres, and build an instant mix.
+- **Find subtitles**: Search, download, and audit a library for missing subtitles.
+- **Fix metadata**: Correct titles, genres, ratings, and images, in batches or one item at a time, and re-identify items.
+- **Troubleshoot the server**: Read the server log, find failed tasks, and diagnose playback problems.
+- **Administer the server**: Manage users, library scans, scheduled tasks, plugins, devices, and backups.
+- **Report on the library**: Watch history, codec reports, duplicate detection, and library statistics.
+- **Live TV and DVR**: Guide data, channels, recordings, and series timers.
+- **SyncPlay help**: A guide and a prompt for setting up and troubleshooting watch-together groups.
 
-Includes 10 reference guides the AI can consult to help with Jellyfin setup and troubleshooting — transcoding, Docker, file naming, remote access, migrating from Plex/Emby, performance tuning, and more.
+### Built-in Knowledge
 
-### Safety controls
+Eleven reference guides give the assistant checked answers on Jellyfin setup and troubleshooting: transcoding, Docker, file naming, remote access, migrating from Plex or Emby, performance tuning, and more. See [resources](internal/server/resources) for the list.
 
-- **Read-only mode** — prevent all writes with `--read-only`
-- **Disable destructive operations** — block deletes, restarts, and shutdowns with `--disable-destructive`
-- **Toolset scoping** — expose only the tool groups you need with `--toolsets`
-- **Confirmation required** — destructive operations require explicit `confirm=true`; the AI is instructed to ask the user before any write operation
-- **HTTP authentication** — bearer token auth for HTTP transport
+### Safety Controls
+
+- **Read-only mode**: `--read-only` registers only the tools that read.
+- **No destructive actions**: `--disable-destructive` refuses deletes, removals, restores, uninstalls, restarts, shutdowns, revocations, cancellations, version merges and splits, and password, policy, trigger, and whole-configuration changes, while every other action keeps working.
+- **Toolset scoping**: `--toolsets` exposes only the tool groups you name.
+- **Confirmation**: A destructive action confirms with you before it runs. A client that supports MCP form elicitation shows a confirmation form. Any other client receives a warning that the assistant presents, and the assistant repeats the call with `confirm=true` only after you agree. On a client older than MCP 2026-07-28, a form left unanswered for 10 minutes expires, and nothing is done. The assistant is also instructed to ask before any other write.
+- **HTTP authentication**: The HTTP transport requires a bearer token whenever it listens beyond localhost.
 
 ### Prompts
 
-18 pre-built workflows like `movie-night`, `binge-watch`, `library-health`, `troubleshoot`, `duplicate-finder`, and `codec-optimize` that guide the AI through multi-step tasks. See [prompts](internal/server/prompts) for the full list.
+Nineteen workflows, such as `movie-night`, `binge-watch`, `library-health`, `troubleshoot`, `duplicate-finder`, and `codec-optimize`, walk the assistant through a multi-step task. See [prompts](internal/server/prompts) for the full list.
 
 ## Setup
 
-### 1. Get a Jellyfin API key
+### 1. Get a Jellyfin API Key
 
-1. Open your Jellyfin web UI
-2. Go to **Dashboard > Advanced > API Keys**
-3. Click **+** to create a new key
-4. Give it a name (e.g., "MCP") and copy the key
+1. Open the Jellyfin web interface.
+2. Go to Dashboard > Advanced > API Keys.
+3. Select + to create a key.
+4. Name it, such as "MCP", and copy the key.
 
 ### 2. Install jellyfin-mcp
 
-| Method | Command | Requirements |
-|--------|---------|--------------|
-| Binary | Download from [Releases](https://github.com/jaredtrent/jellyfin-mcp/releases) | None |
-| Go install | `go install github.com/jaredtrent/jellyfin-mcp@latest` | [Go 1.25+](https://go.dev/dl/) |
-| Go run | `go run github.com/jaredtrent/jellyfin-mcp@latest` | [Go 1.25+](https://go.dev/dl/) |
-| npx | `npx -y @jaredtrent/jellyfin-mcp` | npm (linux/x64 only) |
-| Docker | `docker pull ghcr.io/jaredtrent/jellyfin-mcp` | [Docker](https://docs.docker.com/get-docker/) |
+**macOS**: Open Terminal, paste these lines, and press Return. They download the build for your Mac's chip and put it in `/usr/local/bin`, asking once for your Mac password.
+
+```sh
+chip=$([ "$(uname -m)" = arm64 ] && echo apple-silicon || echo intel)
+sudo mkdir -p /usr/local/bin
+curl -fsSL "https://github.com/jaredtrent/jellyfin-mcp/releases/latest/download/jellyfin-mcp_macOS_$chip.tar.gz" | sudo tar -xz -C /usr/local/bin jellyfin-mcp
+jellyfin-mcp --help
+```
+
+The last line prints the usage when the install worked. Run the same lines again to update to the newest release, and run `sudo rm /usr/local/bin/jellyfin-mcp` to uninstall.
+
+**If you downloaded the archive in a browser instead**, macOS blocks the program the first time you or Claude run it, and shows a dialog that offers Move to Trash or Done. macOS does this for every downloaded program that Apple hasn't notarized, and jellyfin-mcp isn't notarized. Click Done, then clear the download flag in Terminal, using the path where you put the file:
+
+```sh
+xattr -d com.apple.quarantine /usr/local/bin/jellyfin-mcp
+```
+
+**Linux**: Paste these lines into a terminal. They download the build for your processor and put it in `/usr/local/bin`.
+
+```sh
+arch=$([ "$(uname -m)" = aarch64 ] && echo arm64 || echo x64)
+curl -fsSL "https://github.com/jaredtrent/jellyfin-mcp/releases/latest/download/jellyfin-mcp_linux_$arch.tar.gz" | sudo tar -xz -C /usr/local/bin jellyfin-mcp
+jellyfin-mcp --help
+```
+
+**Windows**: Download `jellyfin-mcp_windows_x64.zip` from [Releases](https://github.com/jaredtrent/jellyfin-mcp/releases/latest), extract `jellyfin-mcp.exe`, and move it to a folder you keep, such as `C:\Tools\jellyfin-mcp`. Note the full path; Claude needs it in the next step.
 
 <details>
-<summary>Detailed instructions for each method</summary>
+<summary>Other ways to run jellyfin-mcp</summary>
 
-**Binary** — download and extract:
+| Method | Command | Requirements |
+|--------|---------|--------------|
+| Go install | `go install github.com/jaredtrent/jellyfin-mcp@latest` | [Go 1.26+](https://go.dev/dl/) |
+| Go run | `go run github.com/jaredtrent/jellyfin-mcp@latest` | [Go 1.26+](https://go.dev/dl/) |
+| npx | `npx -y @jaredtrent/jellyfin-mcp` | npm, on linux/x64 only |
+| Docker | `docker pull ghcr.io/jaredtrent/jellyfin-mcp` | [Docker](https://docs.docker.com/get-docker/) |
 
-1. Download the archive for your platform from [Releases](https://github.com/jaredtrent/jellyfin-mcp/releases)
-2. Extract it: `tar xzf jellyfin-mcp_*.tar.gz` (or unzip on Windows)
-3. Move the binary somewhere on your PATH: `sudo mv jellyfin-mcp /usr/local/bin/`
-4. Verify: `jellyfin-mcp --help`
+**Go install** places the binary in `$GOPATH/bin`, usually `~/go/bin`, and builds the newest commit on the main branch. Use the full path, such as `/Users/you/go/bin/jellyfin-mcp`, in the client configurations below.
 
-**Go install** — places the binary in `$GOPATH/bin` (usually `~/go/bin`). Make sure that directory is on your PATH, then verify: `jellyfin-mcp --help`. (GUI clients may not see `~/go/bin` — see the Claude Desktop note below.)
+**Go run** needs no install step. Each launch resolves the latest version again and rebuilds, and that startup delay can make an MCP client time out. The client also needs `go` on its PATH. Install the binary for regular use.
 
-**Go run** — no install step, best for a quick try. `go run …@latest` re-resolves the latest version and rebuilds on each launch, adding startup latency that can make MCP clients time out; `go` must also be on the client's PATH. Install the binary for regular use.
+**npx** bundles a compiled linux/x64 binary for MetaMCP and other Docker-based MCP gateways. On any other platform, use one of the methods above.
 
-**npx** — bundles a pre-compiled linux/x64 binary. Intended for MetaMCP and other Docker-based MCP gateways. For other platforms, use one of the methods above.
-
-**Docker** — a multi-arch image (`linux/amd64`, `linux/arm64`) published to GHCR. Runs the Streamable HTTP transport by default. See the [Docker](#docker) section below.
+**Docker** publishes a multi-arch image for `linux/amd64` and `linux/arm64` to GHCR. It runs the Streamable HTTP transport by default. See the [Docker](#docker) section below.
 
 </details>
 
-### 3. Connect to your MCP client
+### 3. Connect Your MCP Client
 
-Pick the client you use and follow the steps below. In every example, replace the URL and API key with yours — use `http://YOUR_SERVER:8096` for a standard install, or `https://YOUR_SERVER:8920` only if you've enabled HTTPS in Jellyfin.
+Pick the client you use and follow its steps. In every example, replace the URL and API key with yours: `http://YOUR_SERVER:8096` for a standard install, or `https://YOUR_SERVER:8920` only if you turned on HTTPS in Jellyfin.
 
 #### Claude Desktop
 
-1. Open your Claude Desktop config file:
-   - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
-   - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
-   - Linux: `~/.config/Claude/claude_desktop_config.json`
-2. Add the following:
+1. Open the configuration file from Claude Desktop. On macOS, choose Claude > Settings… in the menu bar, open Developer, and click Edit Config.
+2. Add the server. If the file is empty or holds only `{}`, replace its contents with this:
 
-**If you installed the binary:**
+   ```json
+   {
+     "mcpServers": {
+       "jellyfin-mcp": {
+         "command": "/usr/local/bin/jellyfin-mcp",
+         "env": {
+           "JELLYFIN_URL": "http://YOUR_SERVER:8096",
+           "JELLYFIN_API_KEY": "your_api_key"
+         }
+       }
+     }
+   }
+   ```
 
-```json
-{
-  "mcpServers": {
-    "jellyfin": {
-      "command": "jellyfin-mcp",
-      "env": {
-        "JELLYFIN_URL": "http://YOUR_SERVER:8096",
-        "JELLYFIN_API_KEY": "your_api_key"
-      }
-    }
-  }
-}
-```
+   If the file already has an `mcpServers` section, add the `"jellyfin-mcp": { … }` entry inside it, with a comma between it and the entry before it.
 
-If Claude can't find the binary, use its full path instead of `"jellyfin-mcp"` — GUI apps don't inherit your shell PATH, so a `go install` binary in `~/go/bin` is often invisible to them. Run `which jellyfin-mcp` (macOS/Linux) or `where jellyfin-mcp` (Windows) to get the path.
+   Claude Desktop doesn't use your terminal's PATH, so `command` is the full path to the program. On Windows, give the path to `jellyfin-mcp.exe` with each backslash doubled, such as `"C:\\Tools\\jellyfin-mcp\\jellyfin-mcp.exe"`.
+3. Quit Claude Desktop completely, with Claude > Quit Claude or Command-Q, and open it again. Closing the window leaves it running.
+4. Check the connection: click + in the message box, point to Connectors, and look for jellyfin-mcp. Then ask Claude "What libraries do I have?"
 
-**Or skip the install — run directly with Go** (recompiles each launch — slower startup, best for a quick try):
-
-```json
-{
-  "mcpServers": {
-    "jellyfin": {
-      "command": "go",
-      "args": ["run", "github.com/jaredtrent/jellyfin-mcp@latest"],
-      "env": {
-        "JELLYFIN_URL": "http://YOUR_SERVER:8096",
-        "JELLYFIN_API_KEY": "your_api_key"
-      }
-    }
-  }
-}
-```
-
-Restart Claude Desktop for the changes to take effect.
+If jellyfin-mcp doesn't appear, its log says why: `~/Library/Logs/Claude/mcp-server-jellyfin-mcp.log` on macOS, or the `logs` folder in `%APPDATA%\Claude` on Windows.
 
 #### Claude Code
 
 ```sh
-# If installed:
-claude mcp add \
+claude mcp add -s user jellyfin-mcp \
   -e JELLYFIN_URL=http://YOUR_SERVER:8096 \
   -e JELLYFIN_API_KEY=your_api_key \
-  jellyfin -- jellyfin-mcp
-
-# Or run directly with Go:
-claude mcp add \
-  -e JELLYFIN_URL=http://YOUR_SERVER:8096 \
-  -e JELLYFIN_API_KEY=your_api_key \
-  jellyfin -- go run github.com/jaredtrent/jellyfin-mcp@latest
+  -- jellyfin-mcp
 ```
+
+`-s user` adds the server to every project; without it, Claude Code adds it to the current project only. The server name comes before `-e`, which takes several values. `claude mcp list` then shows jellyfin-mcp as connected. If you installed with Go, use the full path, such as `~/go/bin/jellyfin-mcp`, in place of the last `jellyfin-mcp`.
 
 #### OpenCode
 
-Add to `~/.config/opencode/opencode.json` (or `opencode.json` in your project root):
+Add the server to `~/.config/opencode/opencode.json`, or to `opencode.json` in the project root:
 
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
-    "jellyfin": {
+    "jellyfin-mcp": {
       "type": "local",
       "command": ["jellyfin-mcp"],
       "enabled": true,
@@ -172,12 +170,12 @@ To run with Go instead of an installed binary, set `"command": ["go", "run", "gi
 
 #### MetaMCP
 
-MetaMCP runs in Docker with `npx` pre-installed. Use the npm package to run via stdio (no HTTP setup needed):
+MetaMCP runs in Docker with `npx` installed, so the npm package runs the server over stdio with no HTTP setup:
 
 ```json
 {
   "mcpServers": {
-    "jellyfin": {
+    "jellyfin-mcp": {
       "command": "npx",
       "args": ["-y", "@jaredtrent/jellyfin-mcp"],
       "env": {
@@ -189,12 +187,12 @@ MetaMCP runs in Docker with `npx` pre-installed. Use the npm package to run via 
 }
 ```
 
-With CLI flags:
+With flags:
 
 ```json
 {
   "mcpServers": {
-    "jellyfin": {
+    "jellyfin-mcp": {
       "command": "npx",
       "args": ["-y", "@jaredtrent/jellyfin-mcp", "--read-only", "--toolsets", "discovery,media,playback"],
       "env": {
@@ -206,34 +204,32 @@ With CLI flags:
 }
 ```
 
-Alternatively, connect via HTTP transport:
+To connect over HTTP instead:
 
-1. Run `jellyfin-mcp` in HTTP mode on your host:
+1. Run `jellyfin-mcp` in HTTP mode on the host:
 
-```sh
-JELLYFIN_URL=http://YOUR_SERVER:8096 \
-JELLYFIN_API_KEY=your_api_key \
-jellyfin-mcp --http --http-token your_secret_token
-```
+   ```sh
+   JELLYFIN_URL=http://YOUR_SERVER:8096 \
+   JELLYFIN_API_KEY=your_api_key \
+   jellyfin-mcp --http --http-token your_secret_token
+   ```
 
-2. In the MetaMCP dashboard, add a new **Streamable HTTP** server:
-   - **URL**: `http://host.docker.internal:8080/mcp`
-   - **Bearer Token**: `your_secret_token`
+2. In the MetaMCP dashboard, add a Streamable HTTP server with the URL `http://host.docker.internal:8080/mcp` and the bearer token `your_secret_token`.
 
-`host.docker.internal` reaches the host from inside Docker (macOS/Windows). On Linux, add `--addr 0.0.0.0:8080` and use your host's LAN IP instead of `host.docker.internal`.
+`host.docker.internal` reaches the host from inside Docker on macOS and Windows. On Linux, add `--addr 0.0.0.0:8080` and use the host's LAN address in place of `host.docker.internal`.
 
 ## Transport
 
-jellyfin-mcp supports two transport modes. Use whichever your MCP client requires.
+jellyfin-mcp speaks both MCP transports. Use the one your client requires.
 
-| Transport | Flag | When to use |
-|-----------|------|-------------|
-| **stdio** | *(default)* | Claude Desktop, Claude Code, and most MCP clients that launch a local process |
-| **Streamable HTTP** | `--http` | MetaMCP (HTTP mode), or any client that connects to a remote URL |
+| Transport | Flag | When to use it |
+|-----------|------|----------------|
+| stdio | none, the default | Claude Desktop, Claude Code, and most clients that launch a local process |
+| Streamable HTTP | `--http` | MetaMCP in HTTP mode, or any client that connects to a URL |
 
-**stdio** — the server communicates over stdin/stdout. The MCP client starts `jellyfin-mcp` as a subprocess and manages its lifecycle. This is the simplest setup and works with most clients.
+Over **stdio**, the client starts `jellyfin-mcp` as a subprocess and talks to it on standard input and output. It needs no network setup and works with most clients.
 
-**Streamable HTTP** — the server listens on an HTTP endpoint (`/mcp`) that supports bidirectional streaming. Use this when your MCP client can't run a local process or when you want to run the server on a different machine from the client.
+Over **Streamable HTTP**, the server listens on an HTTP endpoint at `/mcp` that streams in both directions. Use it when the client can't run a local process, or when the server runs on a different machine from the client.
 
 ```sh
 # Start in HTTP mode on localhost
@@ -243,11 +239,11 @@ jellyfin-mcp --http
 jellyfin-mcp --http --addr 0.0.0.0:8080 --http-token your_secret_token
 ```
 
-The HTTP server also exposes `/health` (returns `{"status":"ok"}`) for monitoring and load balancer health checks. Sessions time out after 30 minutes of inactivity.
+The endpoint serves clients on every supported MCP protocol version. A client on protocol 2026-07-28 or later sends each request on its own, with no session. An older client gets a session, which times out after 30 minutes of inactivity. The HTTP server also answers `/health` with `{"status":"ok"}` for monitoring and load balancer checks. On either transport a message is limited to 32 MiB, which fits an image or subtitle upload of up to 20 MiB decoded.
 
 ## Docker
 
-A multi-arch image (`linux/amd64`, `linux/arm64`) is published to the GitHub Container Registry: **`ghcr.io/jaredtrent/jellyfin-mcp`**. It runs the Streamable HTTP transport by default, serving the MCP endpoint at `/mcp` and a health check at `/health`.
+The GitHub Container Registry holds a multi-arch image for `linux/amd64` and `linux/arm64` at `ghcr.io/jaredtrent/jellyfin-mcp`. It runs the Streamable HTTP transport by default, serving the MCP endpoint at `/mcp` and a health check at `/health`.
 
 ```sh
 docker run -d --name jellyfin-mcp -p 8080:8080 \
@@ -256,11 +252,11 @@ docker run -d --name jellyfin-mcp -p 8080:8080 \
   ghcr.io/jaredtrent/jellyfin-mcp --http --addr 0.0.0.0:8080 --http-token your_secret_token
 ```
 
-A bearer token is **required** when binding a non-localhost address, so always pass `--http-token`. Point your MCP client at `http://<host>:8080/mcp` and send `Authorization: Bearer your_secret_token`.
+A bearer token is required when the server binds an address other than localhost, so always pass `--http-token`. Point the MCP client at `http://<host>:8080/mcp` and send `Authorization: Bearer your_secret_token`.
 
-**docker compose** — a ready-to-edit [`docker-compose.yml`](docker-compose.yml) is included. Set your Jellyfin URL/key and token, then `docker compose up -d`.
+**Docker Compose**: The repository includes a [`docker-compose.yml`](docker-compose.yml) to edit. Set the Jellyfin URL, the API key, and the token, and `TZ` to give the server your time zone, then run `docker compose up -d`. The compose file passes the token to the server in the `HTTP_TOKEN` environment variable.
 
-**stdio in Docker** — for clients that launch the server as a subprocess, override the entrypoint so it runs with no arguments:
+**stdio in Docker**: For a client that launches the server as a subprocess, override the entrypoint so it runs with no arguments:
 
 ```sh
 docker run -i --rm \
@@ -270,7 +266,7 @@ docker run -i --rm \
   ghcr.io/jaredtrent/jellyfin-mcp
 ```
 
-Image tags: `latest` (latest build from `main`), the full version from release tags (e.g. `2026.603.1`), and `MAJOR.MINOR`.
+Image tags: `latest` is the newest release, a release also gets its full version, such as `2026.603.1`, and its `MAJOR.MINOR`, and `edge` is the latest build from `main`.
 
 ## Options
 
@@ -278,77 +274,79 @@ Image tags: `latest` (latest build from `main`), the full version from release t
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--toolsets` | Comma-separated toolset groups to enable | all |
-| `--read-only` | Only register read-only tools — no writes, deletes, or mutations | off |
-| `--disable-destructive` | Skip destructive tools (delete, restart, shutdown) while allowing other writes | off |
-| `--http` | Run as Streamable HTTP server instead of stdio | off |
+| `--toolsets` | Comma-separated toolset groups to register | all |
+| `--read-only` | Register only the tools that read; no writes, deletes, or other changes | off |
+| `--disable-destructive` | Refuse destructive actions (deletes, removals, restores, uninstalls, restarts, shutdowns, revocations, cancellations, version merges and splits, and password, policy, trigger, and whole-configuration changes) and allow every other write | off |
+| `--http` | Serve Streamable HTTP instead of stdio | off |
 | `--addr` | HTTP listen address | `127.0.0.1:8080` |
-| `--http-token` | Bearer token for HTTP authentication (required when listening on non-localhost) | none |
+| `--http-token` | Bearer token for HTTP authentication, required when listening beyond localhost. The `HTTP_TOKEN` environment variable supplies it instead. | none |
 
-### Environment variables
+### Environment Variables
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `JELLYFIN_API_KEY` | Yes | API key from your Jellyfin dashboard |
-| `JELLYFIN_URL` | No | Server URL — e.g. `http://YOUR_SERVER:8096`, or `https://YOUR_SERVER:8920` if HTTPS is enabled. Defaults to a placeholder, so set this. |
-| `JELLYFIN_USER_ID` | No | User ID — auto-detected from the API key if not set |
+| `JELLYFIN_API_KEY` | Yes | The API key from the Jellyfin dashboard |
+| `JELLYFIN_URL` | No | The server URL, such as `http://YOUR_SERVER:8096`, or `https://YOUR_SERVER:8920` if HTTPS is turned on. The default is a placeholder, so set it. |
+| `HTTP_TOKEN` | No | The bearer token for `--http`. It replaces `--http-token` and keeps the token out of the process list. |
+| `JELLYFIN_USER_ID` | No | The user that user-scoped calls act as, by user ID or username. Without it, a user token acts as its own user, and an API key acts as the first administrator. |
+| `TZ` | No | The time zone, such as `America/New_York`, in which the server states today's date, reads dates such as `2024-01-31` in tool inputs, and gives the dates and times in tool results. It defaults to the system time zone, which is UTC in the Docker image. A name the system doesn't know falls back to UTC with a warning at startup. Windows ignores `TZ` and always uses the system time zone. |
 
 ### Toolsets
 
-31 tools organized into 8 groups. Enable specific groups with `--toolsets discovery,media,...` to reduce context size and keep the AI focused. By default, all toolsets are enabled.
+The 31 tools form eight groups. Registering only the groups you need, with `--toolsets discovery,media,...`, keeps the assistant's context small and its attention on the task. By default every group is registered.
 
 | Toolset | Tools | Covers |
 |---------|-------|--------|
-| `discovery` | 6 | Search, browse, recommendations, item details |
+| `discovery` | 7 | Search, browse, recommendations, item details, download links |
 | `media` | 3 | TV shows, music, people |
 | `user` | 3 | Favorites, playlists, collections |
-| `playback` | 4 | Sessions, playback control, SyncPlay |
-| `admin` | 8 | System, users, libraries, tasks, plugins, devices, server config |
+| `playback` | 3 | Sessions, playback control, starting playback |
+| `admin` | 8 | System, users, libraries, tasks, plugins, devices, server configuration |
 | `content` | 4 | Metadata, subtitles, images, video versions |
 | `livetv` | 2 | Channels, guide, recordings, DVR |
-| `analytics` | 1 | Stats, codec reports, duplicates |
+| `analytics` | 1 | Statistics, codec reports, duplicates |
 
-For a casual "search and play" setup, `--toolsets discovery,media,playback` is a good starting point. Add `user` for playlist/collection management or `admin` for server maintenance. See [tools](internal/server/tools) for the full list with descriptions.
+For a search-and-play setup, start with `--toolsets discovery,media,playback`. Add `user` for playlists and collections, or `admin` for server maintenance. See [tools](internal/server/tools) for every tool with its description.
 
-### Access control examples
+### Access Control Examples
 
 ```sh
-# Casual use — search, browse, and play only (13 tools: read-only discovery/media + playback)
+# Casual use: search, browse, and play only (13 tools: discovery, media, and playback)
 jellyfin-mcp --toolsets discovery,media,playback
 
-# Shared family server — allow playlists and favorites, block all admin operations
+# Shared family server: allow playlists and favorites, block all admin operations
 jellyfin-mcp --toolsets discovery,media,user,playback
 
-# Full access, but protect against accidental deletes/restarts
+# Full access, but refuse deletes and restarts
 jellyfin-mcp --disable-destructive
 
-# Monitoring/analytics only — no writes at all
+# Monitoring and analytics only: no writes at all
 jellyfin-mcp --read-only --toolsets discovery,analytics
 ```
 
-## MCP capabilities
+## MCP Capabilities
 
-Beyond tools, jellyfin-mcp implements several MCP protocol features that compatible clients can use.
+Beyond tools, jellyfin-mcp implements the MCP features below for clients that support them.
 
-**Resources** — 13 live data endpoints the AI can read without a tool call. These include server info, library lists, active sessions, now-playing, favorites, recently played, and more. Clients that support MCP resources can access these directly for quick lookups. See [resources](internal/server/resources) for the full list.
+**Resources**: Thirteen live data endpoints the assistant reads without a tool call, including server info, the library list, active sessions, now playing, favorites, and recently played. See [resources](internal/server/resources) for the full list.
 
-**Resource subscriptions** — Clients can subscribe to session and content resources for real-time change notifications. Sessions are polled every 10 seconds; content (latest additions, recently played) every 60 seconds. The server only polls when at least one subscription is active.
+**Resource subscriptions**: A client can subscribe to the session and content resources and receive a notification when they change. The server polls sessions every 10 seconds and content, such as latest additions and recently played, every 60 seconds, and it polls a group only while a client subscribes to one of its resources. A client's subscriptions end with its session. Over stdio, and on MCP 2026-07-28 when its subscription stream closes, that is when the client disconnects. An HTTP client on an older protocol keeps its session until it closes the session or 30 minutes pass without a request, so a client that only listens for updates must send a request, such as a ping, at least every 30 minutes to stay subscribed.
 
-**Prompts** — 18 pre-built workflows the AI can invoke for multi-step tasks. See [prompts](internal/server/prompts) for the full list.
+**Prompts**: Nineteen workflows the assistant invokes for multi-step tasks. See [prompts](internal/server/prompts) for the full list.
 
-**Completions** — Prompt arguments and resource template URIs support auto-completion (e.g., genre lists, language codes, item/user/library ID lookups).
+**Completions**: Prompt arguments and resource template URIs complete as you type. Fixed vocabularies such as genres and language codes complete from a list, and library names, usernames, and item, user, and library IDs complete from the server.
 
-**Logging** — Tool calls emit structured MCP log notifications with timing data back to the client, in addition to stderr logging for local debugging.
+**Logging**: The server writes each tool call and its duration to stderr for local debugging. It sends no MCP log notifications, which the current protocol deprecates, and doesn't advertise the logging capability.
 
-## Important notes
+## Caveats
 
-**API key permissions** — The API key grants full access to whatever Jellyfin permissions are available. For shared or less trusted setups, pair it with `--read-only` or `--toolsets` to limit what the AI can do.
+**API key permissions**: The API key carries every permission Jellyfin gives an API key. On a shared or less trusted server, pair it with `--read-only` or `--toolsets` to limit what the assistant can do. jellyfin-mcp sends the key in the `Authorization` header, which every supported Jellyfin version accepts, so no server setting needs to change.
 
-**Network exposure** — In stdio mode, the server is only accessible to the local MCP client process. In HTTP mode, use `--http-token` whenever the server is reachable beyond localhost. The server refuses to start on a non-localhost address without a token.
+**Network exposure**: Over stdio, only the local MCP client process reaches the server. Over HTTP, pass `--http-token` whenever the server is reachable beyond localhost. The server refuses to start on an address other than localhost without a token.
 
-**Jellyfin version** — Tested against Jellyfin 10.8 through 10.11. Older versions may be missing some API endpoints (e.g., playback reporting, activity log queries).
+**Jellyfin version**: jellyfin-mcp supports Jellyfin 10.11 and 12.x, and logs a warning at startup when the server is older. A few features need Jellyfin 12: filtering by audio or subtitle language, an item's original language, and listing the collections that include an item. The activity log's filters work on both. Jellyfin 12 applies them itself, and on 10.11 jellyfin-mcp applies them to the 2,000 most recent entries.
 
-**Single binary, no runtime dependencies** — jellyfin-mcp is a statically compiled Go binary. No Node.js, Python, Java, or container runtime is required. The npm package is just a delivery wrapper around the same binary.
+**Single binary**: jellyfin-mcp is a statically compiled Go binary with no runtime dependencies. It needs no Node.js, Python, Java, or container runtime. The npm package is a delivery wrapper around the same binary.
 
 ## License
 
@@ -356,4 +354,4 @@ Beyond tools, jellyfin-mcp implements several MCP protocol features that compati
 
 ## AI Disclosure
 
-This project was made with the help of AI tools, but with a lot of manual effort towards SDK compliance, usability, and minimal slop. 
+AI tools helped write this project. Hard work went into SDK compliance, usability, and keeping the output helpful, accurate, and lean.

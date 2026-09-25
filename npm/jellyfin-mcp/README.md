@@ -1,19 +1,19 @@
 # @jaredtrent/jellyfin-mcp
 
-MCP server that connects AI assistants to your [Jellyfin](https://jellyfin.org) media server — 31 tools, 13 live resources, and 18 guided workflows. Search your library, control playback, manage metadata, find subtitles, troubleshoot your server, and more.
+An MCP server that connects an AI assistant to your [Jellyfin](https://jellyfin.org) media server, with 31 tools, 13 live resources, and 19 guided workflows. The assistant searches your library, controls playback, fixes metadata, finds subtitles, and troubleshoots the server.
 
-This package bundles a pre-compiled native binary. No Node.js runtime is used at execution time — npm is just the delivery mechanism.
+This package bundles a compiled native binary. Nothing runs on Node.js; npm is the delivery mechanism.
 
-For source code and additional install methods (binary download, `go install`), see the [GitHub repo](https://github.com/jaredtrent/jellyfin-mcp).
+The [GitHub repository](https://github.com/jaredtrent/jellyfin-mcp) holds the source and the other install methods, such as the binary download and `go install`.
 
-## Quick start
+## Quick Start
 
-Add to your MCP client config:
+Add the server to your MCP client configuration:
 
 ```json
 {
   "mcpServers": {
-    "jellyfin": {
+    "jellyfin-mcp": {
       "command": "npx",
       "args": ["-y", "@jaredtrent/jellyfin-mcp"],
       "env": {
@@ -25,7 +25,7 @@ Add to your MCP client config:
 }
 ```
 
-Replace `JELLYFIN_URL` with your Jellyfin server address and `JELLYFIN_API_KEY` with an API key from your Jellyfin dashboard (**Dashboard > Advanced > API Keys**).
+Replace `JELLYFIN_URL` with your Jellyfin server address and `JELLYFIN_API_KEY` with an API key from your Jellyfin dashboard (Dashboard > Advanced > API Keys).
 
 <details>
 <summary>Claude Desktop</summary>
@@ -35,7 +35,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS)
 ```json
 {
   "mcpServers": {
-    "jellyfin": {
+    "jellyfin-mcp": {
       "command": "npx",
       "args": ["-y", "@jaredtrent/jellyfin-mcp"],
       "env": {
@@ -54,10 +54,10 @@ Restart Claude Desktop after saving.
 <summary>Claude Code</summary>
 
 ```sh
-claude mcp add \
+claude mcp add -s user jellyfin-mcp \
   -e JELLYFIN_URL=http://YOUR_SERVER:8096 \
   -e JELLYFIN_API_KEY=your_api_key \
-  jellyfin -- npx -y @jaredtrent/jellyfin-mcp
+  -- npx -y @jaredtrent/jellyfin-mcp
 ```
 </details>
 
@@ -70,18 +70,19 @@ Add as a STDIO server in the MetaMCP dashboard using the JSON config above. Envi
 <details>
 <summary>Other MCP clients</summary>
 
-Any client that supports the `mcpServers` JSON format (Cursor, VS Code Copilot, Windsurf, OpenCode, etc.) can use the config above. Consult your client's documentation for the config file location.
+Any client that reads the `mcpServers` JSON format, such as Cursor, VS Code Copilot, Windsurf, and OpenCode, takes the configuration above. The client's documentation names its configuration file.
 </details>
 
-## Environment variables
+## Environment Variables
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `JELLYFIN_API_KEY` | Yes | — | API key from your Jellyfin dashboard |
-| `JELLYFIN_URL` | No | — | Server URL, e.g. `http://YOUR_SERVER:8096` (or `https://YOUR_SERVER:8920` if HTTPS is enabled) |
-| `JELLYFIN_USER_ID` | No | auto-detected | User ID for user-scoped operations |
+| `JELLYFIN_API_KEY` | Yes | none | The API key from the Jellyfin dashboard |
+| `JELLYFIN_URL` | No | a placeholder | The server URL, such as `http://YOUR_SERVER:8096`, or `https://YOUR_SERVER:8920` if HTTPS is turned on |
+| `JELLYFIN_USER_ID` | No | the first administrator | The user that user-scoped calls act as: a user ID or a username. Without it, an API key acts as the first administrator. |
+| `TZ` | No | system time zone | Time zone, such as `America/New_York`, in which the server states today's date, reads dates such as `2024-01-31` in tool inputs, and gives the dates and times in tool results. Set it in the client's `env` block, because MCP clients usually do not pass your shell's environment to the server. A name the system doesn't know falls back to UTC with a warning at startup. Windows ignores `TZ` and always uses the system time zone. |
 
-## CLI flags
+## Flags
 
 Append flags after the package name in the `args` array:
 
@@ -92,83 +93,83 @@ Append flags after the package name in the `args` array:
 | Flag | Description |
 |------|-------------|
 | `--toolsets` | Comma-separated groups: `discovery`, `media`, `user`, `playback`, `admin`, `content`, `analytics`, `livetv` |
-| `--read-only` | Only register read-only tools |
-| `--disable-destructive` | Skip destructive tools (delete, restart, shutdown) |
+| `--read-only` | Register only the tools that read |
+| `--disable-destructive` | Refuse destructive actions (deletes, removals, restores, uninstalls, restarts, shutdowns, revocations, cancellations, version merges and splits, and password, policy, trigger, and whole-configuration changes) and allow every other write |
 
-## Tools (31)
+## Tools (30)
 
 <details>
-<summary><strong>discovery</strong> — search, browse, recommendations</summary>
+<summary><strong>discovery</strong>: search, browse, recommendations</summary>
 
 | Tool | Description |
 |------|-------------|
 | `jellyfin_libraries` | List all media libraries and their IDs |
 | `jellyfin_search` | Search for media by keyword |
-| `jellyfin_browse` | Browse and filter by genre, year, studio, person, rating, sort order |
-| `jellyfin_get_item` | Full metadata for a specific item (genres, cast, codecs, ratings, provider IDs) |
+| `jellyfin_browse` | Browse and filter by genre, year, studio, person, rating, date added, audio and subtitle language (Jellyfin 12), sort order, and any user's play state |
+| `jellyfin_get_item` | Full metadata for a specific item (genres, cast, codecs, ratings, provider IDs, chapters, and on Jellyfin 12 the original language and the collections that include it) |
 | `jellyfin_recommendations` | Personalized suggestions, next up, latest additions, similar items |
-| `jellyfin_item_extras` | Special features, trailers, theme songs, intro/outro markers, download URLs |
+| `jellyfin_item_extras` | Special features, trailers, theme songs, intro/outro markers |
+| `jellyfin_download_link` | Link to download an item: its page in the Jellyfin web app, with the file's path and size |
 </details>
 
 <details>
-<summary><strong>media</strong> — TV shows, music, people</summary>
+<summary><strong>media</strong>: TV shows, music, people</summary>
 
 | Tool | Description |
 |------|-------------|
 | `jellyfin_tv_shows` | Navigate series structure: seasons, episodes, next up |
 | `jellyfin_music` | Browse artists, albums, genres; generate instant mix playlists |
-| `jellyfin_people` | Search actors, directors, writers, and studios |
+| `jellyfin_people` | Search actors, directors, writers, and studios (music artists are under `jellyfin_music`) |
 </details>
 
 <details>
-<summary><strong>user</strong> — playlists, collections, favorites</summary>
+<summary><strong>user</strong>: playlists, collections, favorites</summary>
 
 | Tool | Description |
 |------|-------------|
 | `jellyfin_user_data` | Favorites, ratings, played/unplayed status |
-| `jellyfin_playlists` | Create, modify, reorder, and deduplicate playlists |
+| `jellyfin_playlists` | Create, modify, reorder, deduplicate, and delete playlists |
 | `jellyfin_collections` | Create and manage box set collections |
 </details>
 
 <details>
-<summary><strong>playback</strong> — sessions, control, SyncPlay</summary>
+<summary><strong>playback</strong>: sessions, control, play</summary>
 
 | Tool | Description |
 |------|-------------|
 | `jellyfin_sessions` | List active client sessions and resumable items |
 | `jellyfin_playback_control` | Play, pause, seek, stop, volume, mute, send messages to clients |
 | `jellyfin_play` | Start playback of items on a client (play now, play next, add to queue) |
-| `jellyfin_syncplay` | Synchronized group watching sessions |
 </details>
 
 <details>
-<summary><strong>admin</strong> — system, users, library, plugins</summary>
+<summary><strong>admin</strong>: system, users, library, plugins</summary>
 
 | Tool | Description |
 |------|-------------|
-| `jellyfin_system_info` | Server info, storage, activity logs, log files, playback history |
+| `jellyfin_system_info` | Server info, storage, activity log with filters and sorting, log files, playback history |
 | `jellyfin_system_control` | Restart or shut down the server |
-| `jellyfin_users` | Create, delete, update users; manage permissions and Quick Connect |
+| `jellyfin_users` | Create, delete, update users; manage permissions and Quick Connect (deleting, changing a policy or password, and `qc_authorize` ask for confirmation) |
 | `jellyfin_library_manage` | Library scans, metadata refresh, folder management, filesystem browsing |
 | `jellyfin_tasks` | View and manage scheduled tasks and triggers |
 | `jellyfin_plugins` | Install, configure, enable/disable plugins and repositories |
 | `jellyfin_devices` | Manage connected devices and API keys |
-| `jellyfin_server` | Read/write server configuration, manage backups |
+| `jellyfin_server` | Read/write server configuration; list, inspect, create, and restore backups |
 </details>
 
 <details>
-<summary><strong>content</strong> — metadata, subtitles, images</summary>
+<summary><strong>content</strong>: metadata, subtitles, images</summary>
 
 | Tool | Description |
 |------|-------------|
 | `jellyfin_metadata` | Search and apply metadata from online providers, manual edits, batch updates |
 | `jellyfin_subtitles_lyrics` | Search, download, and manage subtitles and lyrics |
-| `jellyfin_images` | List, download, and upload item images |
+| `jellyfin_images` | List, download, and upload item images (`image_type` is one of Jellyfin's image types) |
 | `jellyfin_videos` | Merge or split alternate video versions |
 </details>
 
 <details>
-<summary><strong>livetv</strong> — guide, channels, DVR</summary>
+<summary><strong>livetv</strong>: guide, channels, DVR</summary>
 
 | Tool | Description |
 |------|-------------|
@@ -177,26 +178,26 @@ Append flags after the package name in the `args` array:
 </details>
 
 <details>
-<summary><strong>analytics</strong> — stats, reports</summary>
+<summary><strong>analytics</strong>: statistics, reports</summary>
 
 | Tool | Description |
 |------|-------------|
 | `jellyfin_analytics` | Library stats, codec reports, duplicates, unplayed items |
 </details>
 
-## Prompts (18)
+## Prompts (19)
 
-Pre-built multi-step workflows: `find-and-play`, `resume-watching`, `whats-new`, `movie-night`, `music-listen`, `binge-watch`, `fix-subtitles`, `who-is-watching`, `troubleshoot`, `bulk-metadata-fix`, `subtitle-audit`, `library-report`, `duplicate-finder`, `watch-history`, `codec-optimize`, `parental-controls`, `server-setup`, `library-health`.
+Multi-step workflows: `find-and-play`, `resume-watching`, `whats-new`, `movie-night`, `music-listen`, `binge-watch`, `fix-subtitles`, `who-is-watching`, `troubleshoot`, `bulk-metadata-fix`, `subtitle-audit`, `library-report`, `duplicate-finder`, `watch-history`, `codec-optimize`, `parental-controls`, `server-setup`, `library-health`, `syncplay-help`.
 
 ## Safety
 
-- Destructive operations require explicit `confirm=true` — the AI is instructed to ask first
-- `--read-only` and `--disable-destructive` flags for restricted environments
-- `--toolsets` to expose only the tool groups you need
+- A destructive action confirms with you before it runs, through a confirmation form in a client that supports MCP elicitation, and otherwise through a warning the assistant presents before it repeats the call with `confirm=true`. On a client older than MCP 2026-07-28, a form left unanswered for 10 minutes expires, and nothing is done.
+- `--read-only` and `--disable-destructive` restrict what the assistant can change.
+- `--toolsets` exposes only the tool groups you name.
 
 ## Platform
 
-This package contains a **linux/x64** binary. For macOS, Windows, or ARM, see the [GitHub repo](https://github.com/jaredtrent/jellyfin-mcp#2-install-jellyfin-mcp) for binary downloads and `go install`.
+This package holds a linux/x64 binary. For macOS, Windows, or ARM, the [GitHub repository](https://github.com/jaredtrent/jellyfin-mcp#2-install-jellyfin-mcp) has binary downloads and `go install`.
 
 ## License
 
