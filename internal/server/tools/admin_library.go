@@ -19,10 +19,11 @@ func RegisterAdminLibraryTools(server *mcp.Server, client jf.Client, enabled fun
 			Name:  "jellyfin_library_manage",
 			Title: "Library Management",
 			InputSchema: jf.WithEnums[jf.LibraryManageInput](map[string][]any{
-				"action": {"scan", "refresh_item", "delete_item", "list_folders", "add_folder", "remove_folder", "add_path", "remove_path", "rename_folder", "update_options", "browse_drives", "browse_directory"},
+				"action": {"scan", "scan_path", "refresh_item", "delete_item", "list_folders", "add_folder", "remove_folder", "add_path", "remove_path", "rename_folder", "update_options", "browse_drives", "browse_directory"},
 			}),
 			Description: "Manage media libraries: scan for new content, refresh metadata, delete items, and manage library folders/paths. " +
-				"Use 'scan' to trigger a full library scan for new or changed content. Use 'refresh_item' to re-fetch metadata and images for a specific item (with a library's item_id, it rescans that library). " +
+				"Use 'scan' to trigger a full library scan for new or changed content, or 'scan_path' to report one path as changed and have Jellyfin read the nearest item that holds it: an item's own path reads that item, and a folder that is no item itself reads the library around it. " +
+				"Use 'refresh_item' to re-fetch metadata and images for a specific item (with a library's item_id, it rescans that library). " +
 				"Use 'delete_item' to permanently remove an item (destructive). Use 'list_folders' to see library configuration. " +
 				"Use 'add_folder'/'remove_folder' to create or delete libraries, and 'add_path'/'remove_path' to manage media paths within a library. " +
 				"When 'add_folder' is given a path, the new library starts with that media path and a library scan is requested. " +
@@ -36,6 +37,25 @@ func RegisterAdminLibraryTools(server *mcp.Server, client jf.Client, enabled fun
 					return jf.ErrResult("Failed to start library scan: %v", err), nil, nil
 				}
 				return jf.TextResult("Library scan started. This runs in the background and may take several minutes for large libraries."), nil, nil
+
+			case "scan_path":
+				if args.Path == "" {
+					return jf.ErrResult("path is required for scan_path."), nil, nil
+				}
+				// Jellyfin hands the path to its library monitor and reads
+				// nothing else from this body: UpdateType is documented as
+				// Created, Modified, or Deleted, but no version consults it,
+				// so it is left out rather than sent as a guess.
+				body := map[string]any{"Updates": []map[string]any{{"Path": args.Path}}}
+				if err := client.PostNoContent(ctx, "/Library/Media/Updated", nil, body); err != nil {
+					return jf.ErrResult("Failed to report the changed path: %v", err), nil, nil
+				}
+				// The monitor waits out its debounce before it reads anything,
+				// because a folder being written is not complete yet. It reads
+				// the nearest item holding the path, which is the library when
+				// no item stands on the path itself: a movie is its file, so a
+				// movie's folder reads the library that holds it.
+				return jf.TextResult(fmt.Sprintf("Jellyfin was told '%s' changed. After the library monitor's delay, 60 seconds by default, it reads the nearest item that holds the path: that item, or the library around it when no item stands on the path itself. A path no library holds is ignored.", args.Path)), nil, nil
 
 			case "refresh_item":
 				if args.ItemID == "" {
@@ -222,7 +242,7 @@ func RegisterAdminLibraryTools(server *mcp.Server, client jf.Client, enabled fun
 				return jf.TextResult(fmt.Sprintf("Directory contents of '%s':\n\n%s", args.Path, jf.FormatJSON(contents))), nil, nil
 
 			default:
-				return jf.ErrResult("Invalid action '%s'. Valid actions: scan, refresh_item, delete_item, list_folders, add_folder, remove_folder, add_path, remove_path, rename_folder, update_options, browse_drives, browse_directory", args.Action), nil, nil
+				return jf.ErrResult("Invalid action '%s'. Valid actions: scan, scan_path, refresh_item, delete_item, list_folders, add_folder, remove_folder, add_path, remove_path, rename_folder, update_options, browse_drives, browse_directory", args.Action), nil, nil
 			}
 		})
 	}
