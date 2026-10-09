@@ -177,6 +177,47 @@ func TestLibraryManage_RefreshItemSendsRefreshModes(t *testing.T) {
 	}
 }
 
+// refresh_mode scan is what a library's own Scan Library sends: the file read
+// that finds new, changed, and removed items, with the providers filling in
+// only what is missing. A library or folder given by item_id is read that way
+// instead of running a metadata refresh over every item it holds.
+func TestLibraryManage_RefreshItemScanModeSendsDefaultModes(t *testing.T) {
+	var got url.Values
+	mc := &mockClient{postNoContentFunc: func(_ context.Context, endpoint string, params url.Values, _ any) error {
+		if endpoint != "/Items/lib-1/Refresh" {
+			t.Errorf("POST %s", endpoint)
+		}
+		got = params
+		return nil
+	}}
+	result := callTool(t, mc, "", "jellyfin_library_manage", map[string]any{"action": "refresh_item", "item_id": "lib-1", "refresh_mode": "scan"})
+	if got.Get("MetadataRefreshMode") != "Default" || got.Get("ImageRefreshMode") != "Default" {
+		t.Errorf("modes = %v, want both Default", got)
+	}
+	for _, key := range []string{"ReplaceAllMetadata", "ReplaceAllImages"} {
+		if got.Has(key) {
+			t.Errorf("%s = %q, want unset", key, got.Get(key))
+		}
+	}
+	if text := resultText(t, result); !strings.Contains(text, "Scan started") {
+		t.Errorf("got %s", text)
+	}
+}
+
+// A scan fills in only what is missing, so a flag asking for a replacement has
+// nothing to act on, and the pair is refused rather than sent to be ignored.
+func TestLibraryManage_RefreshItemScanModeRefusesReplacement(t *testing.T) {
+	writes := 0
+	mc := &mockClient{postNoContentFunc: func(context.Context, string, url.Values, any) error { writes++; return nil }}
+	result := callTool(t, mc, "", "jellyfin_library_manage", map[string]any{"action": "refresh_item", "item_id": "lib-1", "refresh_mode": "scan", "replace_all_metadata": true})
+	if text := resultText(t, result); !strings.Contains(text, "replace_all_metadata") {
+		t.Errorf("got %s", text)
+	}
+	if writes != 0 {
+		t.Errorf("%d requests sent for a refused pair", writes)
+	}
+}
+
 func TestLibraryManage_UpdateOptionsAsksConfirmation(t *testing.T) {
 	writes := 0
 	mc := &mockClient{
