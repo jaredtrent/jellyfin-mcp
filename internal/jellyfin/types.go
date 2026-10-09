@@ -174,8 +174,9 @@ type LibraryManageInput struct {
 	CollectionType  string `json:"collection_type,omitempty" jsonschema:"Type for add_folder: movies, tvshows, music, musicvideos, homevideos, boxsets, books, mixed"`
 	Path            string `json:"path,omitempty" jsonschema:"Filesystem path for add_folder (the library's first media path; a library scan is requested), add_path, remove_path, or browse_directory"`
 	LibraryOptions  any    `json:"library_options,omitempty" jsonschema:"For update_options: the complete LibraryOptions object from list_folders, edited. It replaces all of the library's options and asks the user to confirm"`
-	ReplaceMetadata *bool  `json:"replace_all_metadata,omitempty" jsonschema:"For refresh_item: replace all metadata, including edits, instead of filling in what is missing (default false)"`
-	ReplaceImages   *bool  `json:"replace_all_images,omitempty" jsonschema:"For refresh_item: replace all images instead of adding missing ones (default false)"`
+	ReplaceMetadata *bool  `json:"replace_all_metadata,omitempty" jsonschema:"For refresh_item: replace all metadata, including edits, instead of filling in what is missing (default false). Only refresh_mode metadata acts on it"`
+	ReplaceImages   *bool  `json:"replace_all_images,omitempty" jsonschema:"For refresh_item: replace all images instead of adding missing ones (default false). Only refresh_mode metadata acts on it"`
+	RefreshMode     string `json:"refresh_mode,omitempty" jsonschema:"For refresh_item: metadata (the default) runs Jellyfin's metadata and image providers, which is what re-fetching metadata means, and fills in what is missing unless a replace flag asks for more; scan reads the item and everything under it and fills in metadata only where it is missing, which is what a library's own Scan Library sends. Give a library's or a folder's item_id with scan to pick up new, changed, and removed files in that part of the library without running the providers over every item it holds"`
 	Confirm         *bool  `json:"confirm,omitempty" jsonschema:"Leave unset so the user is asked to confirm delete_item, remove_folder, remove_path, or update_options. Set to true only after the user agreed to the warning this tool returned"`
 }
 

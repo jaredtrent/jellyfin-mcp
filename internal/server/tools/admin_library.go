@@ -19,10 +19,11 @@ func RegisterAdminLibraryTools(server *mcp.Server, client jf.Client, enabled fun
 			Name:  "jellyfin_library_manage",
 			Title: "Library Management",
 			InputSchema: jf.WithEnums[jf.LibraryManageInput](map[string][]any{
-				"action": {"scan", "refresh_item", "delete_item", "list_folders", "add_folder", "remove_folder", "add_path", "remove_path", "rename_folder", "update_options", "browse_drives", "browse_directory"},
+				"action":       {"scan", "refresh_item", "delete_item", "list_folders", "add_folder", "remove_folder", "add_path", "remove_path", "rename_folder", "update_options", "browse_drives", "browse_directory"},
+				"refresh_mode": {"metadata", "scan"},
 			}),
 			Description: "Manage media libraries: scan for new content, refresh metadata, delete items, and manage library folders/paths. " +
-				"Use 'scan' to trigger a full library scan for new or changed content. Use 'refresh_item' to re-fetch metadata and images for a specific item (with a library's item_id, it rescans that library). " +
+				"Use 'scan' to trigger a full library scan for new or changed content. Use 'refresh_item' to re-fetch metadata and images for a specific item; with a library's or a folder's item_id it reads that part of the library instead (refresh_mode 'scan' is what a library's own Scan Library sends: it reads the files and fills in metadata only where it is missing). " +
 				"Use 'delete_item' to permanently remove an item (destructive). Use 'list_folders' to see library configuration. " +
 				"Use 'add_folder'/'remove_folder' to create or delete libraries, and 'add_path'/'remove_path' to manage media paths within a library. " +
 				"When 'add_folder' is given a path, the new library starts with that media path and a library scan is requested. " +
@@ -41,12 +42,23 @@ func RegisterAdminLibraryTools(server *mcp.Server, client jf.Client, enabled fun
 				if args.ItemID == "" {
 					return jf.ErrResult("item_id is required for refresh_item."), nil, nil
 				}
+				// A scan fills in only what is missing and replaces nothing, so
+				// the flags that ask for a replacement have nothing to act on.
+				scan := args.RefreshMode == "scan"
+				if scan && ((args.ReplaceMetadata != nil && *args.ReplaceMetadata) || (args.ReplaceImages != nil && *args.ReplaceImages)) {
+					return jf.ErrResult("replace_all_metadata and replace_all_images ask for a replacement, which only refresh_mode 'metadata' makes; a scan fills in what is missing and replaces nothing. Leave them unset, or leave refresh_mode unset to run the metadata and image providers."), nil, nil
+				}
 				// Without a refresh mode Jellyfin runs no metadata provider, so
 				// both modes are always FullRefresh; the flags decide whether
 				// existing metadata and images are replaced or only filled in.
+				// A scan sends the modes a library's own Scan Library sends.
+				mode := "FullRefresh"
+				if scan {
+					mode = "Default"
+				}
 				params := url.Values{
-					"MetadataRefreshMode": {"FullRefresh"},
-					"ImageRefreshMode":    {"FullRefresh"},
+					"MetadataRefreshMode": {mode},
+					"ImageRefreshMode":    {mode},
 				}
 				if args.ReplaceMetadata != nil && *args.ReplaceMetadata {
 					params.Set("ReplaceAllMetadata", "true")
@@ -57,6 +69,9 @@ func RegisterAdminLibraryTools(server *mcp.Server, client jf.Client, enabled fun
 				endpoint := fmt.Sprintf("/Items/%s/Refresh", jf.SanitizeID(args.ItemID))
 				if err := client.PostNoContent(ctx, endpoint, params, nil); err != nil {
 					return jf.ErrResult("Failed to refresh item: %v", err), nil, nil
+				}
+				if scan {
+					return jf.TextResult("Scan started. Jellyfin reads this item and everything under it, and fills in metadata only where it is missing. A folder or library reads in the background, and a task list does not show it."), nil, nil
 				}
 				return jf.TextResult("Item metadata refresh started."), nil, nil
 
