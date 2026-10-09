@@ -167,12 +167,12 @@ type UsersInput struct {
 }
 
 type LibraryManageInput struct {
-	Action          string `json:"action" jsonschema:"Action: scan (scan all libraries), refresh_item (refresh metadata for one item), delete_item (permanently delete), list_folders (list libraries), add_folder (create library), remove_folder (delete library), add_path (add media path), remove_path (remove media path), rename_folder (rename library), update_options (set library options), browse_drives (list server drives), browse_directory (browse server filesystem)"`
+	Action          string `json:"action" jsonschema:"Action: scan (scan all libraries), scan_path (report one changed path), refresh_item (refresh metadata for one item), delete_item (permanently delete), list_folders (list libraries), add_folder (create library), remove_folder (delete library), add_path (add media path), remove_path (remove media path), rename_folder (rename library), update_options (set library options), browse_drives (list server drives), browse_directory (browse server filesystem)"`
 	ItemID          string `json:"item_id,omitempty" jsonschema:"Item ID for refresh_item or delete_item"`
 	FolderName      string `json:"folder_name,omitempty" jsonschema:"Library name (not ID) for add_folder, remove_folder, rename_folder (current name), add_path, remove_path, and update_options"`
 	NewName         string `json:"new_name,omitempty" jsonschema:"New library name for rename_folder"`
 	CollectionType  string `json:"collection_type,omitempty" jsonschema:"Type for add_folder: movies, tvshows, music, musicvideos, homevideos, boxsets, books, mixed"`
-	Path            string `json:"path,omitempty" jsonschema:"Filesystem path for add_folder (the library's first media path; a library scan is requested), add_path, remove_path, or browse_directory"`
+	Path            string `json:"path,omitempty" jsonschema:"Filesystem path on the server for add_folder (the library's first media path; a library scan is requested), add_path, remove_path, scan_path (a file or folder that changed), or browse_directory"`
 	LibraryOptions  any    `json:"library_options,omitempty" jsonschema:"For update_options: the complete LibraryOptions object from list_folders, edited. It replaces all of the library's options and asks the user to confirm"`
 	ReplaceMetadata *bool  `json:"replace_all_metadata,omitempty" jsonschema:"For refresh_item: replace all metadata, including edits, instead of filling in what is missing (default false)"`
 	ReplaceImages   *bool  `json:"replace_all_images,omitempty" jsonschema:"For refresh_item: replace all images instead of adding missing ones (default false)"`

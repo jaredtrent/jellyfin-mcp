@@ -177,6 +177,40 @@ func TestLibraryManage_RefreshItemSendsRefreshModes(t *testing.T) {
 	}
 }
 
+// scan_path reports one path to Jellyfin's library monitor, which reads the
+// nearest item holding it instead of the whole library; a download client on
+// another machine cannot be seen by the server's own filesystem watcher, so
+// reporting the path is how its new content reaches the library.
+func TestLibraryManage_ScanPathReportsThePath(t *testing.T) {
+	var posts []postCall
+	callTool(t, libraryManagePosts(t, &posts), "", "jellyfin_library_manage", map[string]any{"action": "scan_path", "path": "/media/Shows/New Show/Season 01"})
+	if len(posts) != 1 {
+		t.Fatalf("%d requests, want 1", len(posts))
+	}
+	if posts[0].endpoint != "/Library/Media/Updated" {
+		t.Errorf("POST %s", posts[0].endpoint)
+	}
+	if len(posts[0].params) != 0 {
+		t.Errorf("params = %v, want none", posts[0].params)
+	}
+	// Jellyfin reads only Path from this body, so nothing else is sent.
+	want := bodyShape(t, map[string]any{"Updates": []map[string]any{{"Path": "/media/Shows/New Show/Season 01"}}})
+	if got := bodyShape(t, posts[0].body); !reflect.DeepEqual(got, want) {
+		t.Errorf("body = %v, want %v", got, want)
+	}
+}
+
+func TestLibraryManage_ScanPathRejectsBlankPath(t *testing.T) {
+	var posts []postCall
+	result := callTool(t, libraryManagePosts(t, &posts), "", "jellyfin_library_manage", map[string]any{"action": "scan_path"})
+	if text := resultText(t, result); !strings.Contains(text, "path is required") {
+		t.Errorf("got %s", text)
+	}
+	if len(posts) != 0 {
+		t.Errorf("%d requests without a path", len(posts))
+	}
+}
+
 func TestLibraryManage_UpdateOptionsAsksConfirmation(t *testing.T) {
 	writes := 0
 	mc := &mockClient{

@@ -45,7 +45,7 @@ Thirty-one tools in eight toolsets. `--toolsets discovery,media,...` registers o
 | `jellyfin_system_info` | Server info, storage, activity log with filters and sorting, log files, playback history |
 | `jellyfin_system_control` | Restart or shut down the server |
 | `jellyfin_users` | Create, delete, update users; manage permissions and Quick Connect (deleting, changing a policy or password, and `qc_authorize` ask for confirmation) |
-| `jellyfin_library_manage` | Library scans, metadata refresh, folder management, filesystem browsing |
+| `jellyfin_library_manage` | Library scans (all libraries, or one path), metadata refresh, folder management, filesystem browsing |
 | `jellyfin_tasks` | View and manage scheduled tasks and triggers |
 | `jellyfin_plugins` | Install, configure, enable/disable plugins and repositories |
 | `jellyfin_devices` | Manage connected devices and API keys |
