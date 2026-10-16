@@ -13,7 +13,8 @@ The library shows no items, the scan never finishes, or items are missing after 
 3. If the media is on a network share, confirm that the share was mounted before Jellyfin started and that the library's path still points at it. jellyfin://guides/library-setup covers shares and the NFS locking problem.
 4. Open Dashboard > Scheduled Tasks and look for a scan that failed, or use `jellyfin_tasks action=list`.
 5. Read the newest server log with `jellyfin_system_info action=log_file severity=warn+error`.
-6. Refresh one item with `jellyfin_library_manage action=refresh_item` to see whether the problem is one folder or the whole library.
+6. Scan one library or folder with `jellyfin_library_manage action=scan` and its `item_id` to see whether the problem is one folder or the whole library.
+7. If new files arrive over the network, such as from a download client on another machine, Jellyfin's file watcher can miss them. Report the new file or folder with `jellyfin_library_manage action=scan` and its `path`, written as the Jellyfin server sees it.
 
 ## Metadata Is Wrong
 
