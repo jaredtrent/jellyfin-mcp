@@ -1,5 +1,23 @@
 # Changelog
 
+## v2026.1015.1
+
+Scans of one library or one changed path, and Go 1.27.2. Thanks to @lz37, whose pull requests #31 and #32 this release builds on.
+
+### Added
+
+- **`jellyfin_library_manage` `scan` takes an `item_id` or a `path`.** With `item_id`, it scans that library, folder, or item the way the dashboard's Scan Library does: Jellyfin reads the files again and runs its metadata providers only for new or changed items. The result points to the library's `RefreshStatus` and `RefreshProgress` in `list_folders`. With `path`, a file or folder as the Jellyfin server sees it, `scan` reports the change, which suits a download that Jellyfin's file watcher can't see. After the server's library monitor delay, which the result states, Jellyfin reads the nearest item at or above the path. A path outside the library folders is refused, with the folders that work, because Jellyfin accepts any path and ignores one that no library holds.
+
+### Changed
+
+- **`scan` refuses `replace_all_metadata` and `replace_all_images`**, which belong to `refresh_item`. It used to ignore them.
+- **`refresh_item`'s description says that on a library or folder it re-fetches metadata for every item under it**, and points to `scan` for new or changed files only.
+- **The npm package contains only the binary**, with its README and `package.json`, and its README points each platform at the right install.
+
+### Security
+
+- **Builds use Go 1.27.2**, which fixes two vulnerabilities in the HTTP server that `--http` runs: a crash from an HPACK encoder race in HTTP/2 (GO-2026-6617), and connection desynchronization after a 2xx CONNECT response in HTTP/1 (GO-2026-6613). The Docker image builds with Go 1.27.2 as well.
+
 ## v2026.924.1
 
 Jellyfin 12 support and MCP protocol 2026-07-28. Thanks to @DrewFerg11 (#24) and @cmc0619 (#25), whose fixes this release builds on, and to @Barrow1990 for reporting #26.
