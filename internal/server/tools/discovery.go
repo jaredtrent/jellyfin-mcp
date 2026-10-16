@@ -24,7 +24,7 @@ func RegisterDiscoveryTools(server *mcp.Server, client jf.Client, enabled func(s
 			Title: "List Libraries",
 			Description: "List all media libraries configured on the Jellyfin server, including Movies, TV Shows, Music, and other collection types. " +
 				"Use this tool first to discover available libraries and their IDs before browsing content with jellyfin_browse. " +
-				"Each library's item_id is the ID that parent_id and enabled_folder_ids take; jellyfin_library_manage takes the library's name.",
+				"Each library's item_id is the ID that parent_id, enabled_folder_ids, and jellyfin_library_manage scan take; the folder actions of jellyfin_library_manage take the library's name.",
 			Annotations: AnnotReadOnly,
 		}, func(ctx context.Context, req *mcp.CallToolRequest, _ jf.NoInput) (*mcp.CallToolResult, *jf.LibraryListOutput, error) {
 			var libs []map[string]any

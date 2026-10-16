@@ -51,7 +51,7 @@ type ItemListOutput struct {
 type LibraryInfo struct {
 	Name           string   `json:"name" jsonschema:"Library name"`
 	CollectionType string   `json:"collection_type" jsonschema:"Collection type, such as movies, tvshows, music, or mixed"`
-	ItemID         string   `json:"item_id" jsonschema:"The library's item ID, which parent_id and enabled_folder_ids take"`
+	ItemID         string   `json:"item_id" jsonschema:"The library's item ID, which parent_id, enabled_folder_ids, and jellyfin_library_manage scan take"`
 	Paths          []string `json:"paths,omitempty" jsonschema:"Folders the library reads"`
 }
 

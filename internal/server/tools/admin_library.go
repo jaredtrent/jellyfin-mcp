@@ -22,7 +22,10 @@ func RegisterAdminLibraryTools(server *mcp.Server, client jf.Client, enabled fun
 				"action": {"scan", "refresh_item", "delete_item", "list_folders", "add_folder", "remove_folder", "add_path", "remove_path", "rename_folder", "update_options", "browse_drives", "browse_directory"},
 			}),
 			Description: "Manage media libraries: scan for new content, refresh metadata, delete items, and manage library folders/paths. " +
-				"Use 'scan' to trigger a full library scan for new or changed content. Use 'refresh_item' to re-fetch metadata and images for a specific item (with a library's item_id, it rescans that library). " +
+				"Use 'scan' to find new, changed, and removed files. With no item_id or path it scans every library. " +
+				"With item_id it scans that library, folder, or item right away, as the dashboard's Scan Library does. " +
+				"With path, a file or folder as the Jellyfin server sees it, it reports that path as changed, which suits a download that just finished: after the server's library monitor delay, Jellyfin reads the nearest item that holds the path. " +
+				"Use 'refresh_item' to re-fetch metadata and images for an item. On a library or folder it re-fetches them for every item under it, so use 'scan' with that item_id when you want only new or changed files. " +
 				"Use 'delete_item' to permanently remove an item (destructive). Use 'list_folders' to see library configuration. " +
 				"Use 'add_folder'/'remove_folder' to create or delete libraries, and 'add_path'/'remove_path' to manage media paths within a library. " +
 				"When 'add_folder' is given a path, the new library starts with that media path and a library scan is requested. " +
@@ -32,6 +35,84 @@ func RegisterAdminLibraryTools(server *mcp.Server, client jf.Client, enabled fun
 		}, func(ctx context.Context, req *mcp.CallToolRequest, args jf.LibraryManageInput) (*mcp.CallToolResult, any, error) {
 			switch args.Action {
 			case "scan":
+				switch {
+				// The replace flags belong to refresh_item. Jellyfin documents
+				// them for a full refresh only, and replace_all_metadata would
+				// make every provider run on every item even in a scan, so a
+				// scan refuses them rather than dropping them unnoticed.
+				case (args.ReplaceMetadata != nil && *args.ReplaceMetadata) || (args.ReplaceImages != nil && *args.ReplaceImages):
+					return jf.ErrResult("A scan reads files and replaces no metadata or images. To replace them, use refresh_item with replace_all_metadata or replace_all_images."), nil, nil
+
+				case args.ItemID != "" && args.Path != "":
+					return jf.ErrResult("Give scan either item_id or path, not both: with item_id it scans that item right away, and with path it reports a change that Jellyfin reads after its library monitor delay."), nil, nil
+
+				case args.ItemID != "":
+					// Default for both modes is what the dashboard's Scan Library
+					// sends: Jellyfin reads the files under the item again, and its
+					// providers run only for items that are new, changed, or due for
+					// a refresh.
+					params := url.Values{
+						"MetadataRefreshMode": {"Default"},
+						"ImageRefreshMode":    {"Default"},
+					}
+					endpoint := fmt.Sprintf("/Items/%s/Refresh", jf.SanitizeID(args.ItemID))
+					if err := client.PostNoContent(ctx, endpoint, params, nil); err != nil {
+						return jf.ErrResult("Failed to start the scan: %v", err), nil, nil
+					}
+					return jf.TextResult("Scan started. Jellyfin reads the files under this item again: it adds new items, updates changed ones, and removes those whose files are gone. Metadata providers run only for new or changed items and for items due for a refresh. The scan runs in the background. When the item is a library, list_folders shows the scan's state as the library's RefreshStatus (Queued, Active, or Idle) and its percent complete as RefreshProgress."), nil, nil
+
+				case args.Path != "":
+					// Jellyfin accepts any path here and resolves it later, when
+					// its library monitor's delay runs out, to the nearest item at
+					// or above the path. A path outside every library folder
+					// resolves to nothing, so it's refused while the caller can
+					// still correct it.
+					var libs []struct {
+						Name      string
+						Locations []string
+					}
+					if err := client.Get(ctx, "/Library/VirtualFolders", nil, &libs); err != nil {
+						return jf.ErrResult("Jellyfin API error: %v", err), nil, nil
+					}
+					// The longest matching folder names the library, because one
+					// library's folder can sit inside another's.
+					var library, holder, report string
+					var folders []string
+					for _, lib := range libs {
+						for _, location := range lib.Locations {
+							if sent, ok := pathUnder(args.Path, location); ok && (library == "" || len(location) > len(holder)) {
+								library, holder, report = lib.Name, location, sent
+							}
+							folders = append(folders, fmt.Sprintf("'%s' (%s)", location, lib.Name))
+						}
+					}
+					if library == "" {
+						if len(folders) == 0 {
+							return jf.ErrResult("'%s' isn't inside a library folder, because no library on the server has a folder. Use add_path to give a library a folder, or add_folder to create a library with one.", args.Path), nil, nil
+						}
+						return jf.ErrResult("'%s' isn't inside a library folder, so Jellyfin would ignore it. Give the path as the Jellyfin server sees it, with the same letter case, inside one of these folders: %s. To scan every library, leave path unset.", args.Path, strings.Join(folders, ", ")), nil, nil
+					}
+					// Jellyfin reads only Path from each update. UpdateType is
+					// documented as Created, Modified, or Deleted, but the server
+					// never consults it.
+					body := map[string]any{"Updates": []map[string]any{{"Path": report}}}
+					if err := client.PostNoContent(ctx, "/Library/Media/Updated", nil, body); err != nil {
+						return jf.ErrResult("Failed to report the changed path: %v", err), nil, nil
+					}
+					// The library monitor waits out its delay before it reads, so
+					// that a folder still being written settles first. The delay
+					// is a server setting, read back so the result states it.
+					when := "After the server's library monitor delay, 60 seconds by default"
+					var config struct{ LibraryMonitorDelay *int }
+					if err := client.Get(ctx, "/System/Configuration", nil, &config); err == nil && config.LibraryMonitorDelay != nil {
+						unit := "seconds"
+						if *config.LibraryMonitorDelay == 1 {
+							unit = "second"
+						}
+						when = fmt.Sprintf("After the server's library monitor delay of %d %s", *config.LibraryMonitorDelay, unit)
+					}
+					return jf.TextResult(fmt.Sprintf("Jellyfin queues a read of '%s' in the %s library. %s, it reads the nearest item at or above the path. That's the item at the path when one exists; otherwise it's the closest item above it, such as a show's season, or the library folder when nothing in between is an item, as with a movie's folder. The read runs in the background, and new items appear in the library when it finishes.", report, library, when)), nil, nil
+				}
 				if err := client.PostNoContent(ctx, "/Library/Refresh", nil, nil); err != nil {
 					return jf.ErrResult("Failed to start library scan: %v", err), nil, nil
 				}
@@ -44,6 +125,8 @@ func RegisterAdminLibraryTools(server *mcp.Server, client jf.Client, enabled fun
 				// Without a refresh mode Jellyfin runs no metadata provider, so
 				// both modes are always FullRefresh; the flags decide whether
 				// existing metadata and images are replaced or only filled in.
+				// On a library or folder, Jellyfin applies the modes to every
+				// item under it.
 				params := url.Values{
 					"MetadataRefreshMode": {"FullRefresh"},
 					"ImageRefreshMode":    {"FullRefresh"},
@@ -226,4 +309,31 @@ func RegisterAdminLibraryTools(server *mcp.Server, client jf.Client, enabled fun
 			}
 		})
 	}
+}
+
+// pathUnder reports whether path is folder or lies under it, and returns the
+// path to report. Paths compare the way Jellyfin resolves a reported path,
+// letter for letter, because it looks each path up by exact match, on Windows
+// too. Under a Windows folder either separator counts, because the server's
+// own path handling reads both, and the path is reported with backslashes, the
+// separator Jellyfin stores, so that its first lookup can find the item at the
+// path itself.
+func pathUnder(path, folder string) (string, bool) {
+	if folder == "" {
+		return path, false
+	}
+	sep := "/"
+	if windowsPath(folder) {
+		sep = `\`
+		path = strings.ReplaceAll(path, "/", sep)
+		folder = strings.ReplaceAll(folder, "/", sep)
+	}
+	folder = strings.TrimRight(folder, sep)
+	return path, path == folder || strings.HasPrefix(path, folder+sep)
+}
+
+// windowsPath reports whether a library folder is a Windows path, one that
+// starts with a drive letter or names a network share.
+func windowsPath(folder string) bool {
+	return strings.HasPrefix(folder, `\\`) || len(folder) >= 2 && folder[1] == ':'
 }
