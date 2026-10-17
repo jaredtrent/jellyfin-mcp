@@ -31,6 +31,8 @@ type MediaItem struct {
 	StartTime         string  `json:"start_time,omitempty" jsonschema:"When a Live TV program or recording starts, in the server's time zone"`
 	EndTime           string  `json:"end_time,omitempty" jsonschema:"When a Live TV program or recording ends, in the server's time zone"`
 	ChannelName       string  `json:"channel_name,omitempty" jsonschema:"The channel of a Live TV program or recording"`
+	MatchingEpisodes  int     `json:"matching_episodes,omitempty" jsonschema:"For a series listed by group_by_series: how many of its episodes match the filters"`
+	TotalEpisodes     int     `json:"total_episodes,omitempty" jsonschema:"For a series listed by group_by_series: how many episodes it has under the filters other than the video size ones"`
 }
 
 // ItemListOutput is a page of items from jellyfin_search or jellyfin_browse.

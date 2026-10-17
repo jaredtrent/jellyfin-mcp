@@ -82,7 +82,7 @@ Append flags after the package name in the `args` array:
 |------|-------------|
 | `jellyfin_libraries` | List all media libraries and their IDs |
 | `jellyfin_search` | Search for media by keyword |
-| `jellyfin_browse` | Browse and filter by genre, year, studio, person, rating, date added, audio and subtitle language (Jellyfin 12), sort order, and any user's play state |
+| `jellyfin_browse` | Browse and filter by genre, year, studio, person, rating, date added, audio and subtitle language (Jellyfin 12), video size (width, height, HD, 4K), sort order, any user's play state, and a list of the shows behind matching episodes |
 | `jellyfin_get_item` | Full metadata for a specific item (genres, cast, codecs, ratings, provider IDs, chapters, and on Jellyfin 12 the original language and the collections that include it) |
 | `jellyfin_recommendations` | Personalized suggestions, next up, latest additions, similar items |
 | `jellyfin_item_extras` | Special features, trailers, theme songs, intro/outro markers |
