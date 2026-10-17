@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"slices"
@@ -108,6 +109,9 @@ func RegisterDiscoveryTools(server *mcp.Server, client jf.Client, enabled func(s
 				"Genres, studios, cast, and provider IDs are not included. Use jellyfin_get_item for full metadata. " +
 				fmt.Sprintf("Filtering by min_date_created or max_date_created returns items newest first by date added and examines at most the %d most recently added items that match the other filters. ", jf.DefaultMaxItems) +
 				"audio_languages and subtitle_languages filter by track language on Jellyfin 12 or later. " +
+				"min_width and max_width filter by video width in pixels, the best measure of quality (max_width=720 is DVD quality or lower); min_height and max_height filter by height but over-count cropped widescreen encodes. Use them with type=Movie or type=Episode and read total_count for a count. " +
+				"is_hd=false and is_4k work on Series as well, so type=Series with is_hd=false lists the standard-definition shows in one call. " +
+				"To list the shows rather than episodes, add group_by_series=true with type=Episode: each series appears once with its matching and total episode counts. " +
 				"For another person's viewing, such as what they watched recently or what they haven't seen, pass their user_id from jellyfin_users list.",
 			Annotations: AnnotReadOnly,
 		}, func(ctx context.Context, req *mcp.CallToolRequest, args jf.BrowseInput) (*mcp.CallToolResult, *jf.ItemListOutput, error) {
@@ -187,6 +191,25 @@ func RegisterDiscoveryTools(server *mcp.Server, client jf.Client, enabled func(s
 			if args.HasSubtitles != nil {
 				params.Set("HasSubtitles", fmt.Sprintf("%v", *args.HasSubtitles))
 			}
+			for _, f := range []struct {
+				name  string
+				value *int
+				param string
+			}{{"min_height", args.MinHeight, "MinHeight"}, {"max_height", args.MaxHeight, "MaxHeight"}, {"min_width", args.MinWidth, "MinWidth"}, {"max_width", args.MaxWidth, "MaxWidth"}} {
+				if f.value == nil {
+					continue
+				}
+				if *f.value <= 0 {
+					return jf.ErrResult("%s must be a positive number of pixels, not %d.", f.name, *f.value), nil, nil
+				}
+				params.Set(f.param, fmt.Sprintf("%d", *f.value))
+			}
+			if args.IsHD != nil {
+				params.Set("IsHD", fmt.Sprintf("%v", *args.IsHD))
+			}
+			if args.Is4K != nil {
+				params.Set("Is4K", fmt.Sprintf("%v", *args.Is4K))
+			}
 			audioLangs, subtitleLangs := commaList(args.AudioLanguages), commaList(args.SubtitleLanguages)
 			for _, f := range []struct{ name, given, codes string }{{"audio_languages", args.AudioLanguages, audioLangs}, {"subtitle_languages", args.SubtitleLanguages, subtitleLangs}} {
 				if strings.TrimSpace(f.given) != "" && f.codes == "" {
@@ -232,6 +255,16 @@ func RegisterDiscoveryTools(server *mcp.Server, client jf.Client, enabled func(s
 			}
 			if args.MaxPremiereDate != "" {
 				params.Set("MaxPremiereDate", args.MaxPremiereDate)
+			}
+			if args.GroupBySeries != nil && *args.GroupBySeries {
+				if !strings.EqualFold(args.Type, "Episode") {
+					return jf.ErrResult("group_by_series needs type=Episode: it lists the series that the matching episodes belong to."), nil, nil
+				}
+				if byCreated {
+					return jf.ErrResult("group_by_series cannot be combined with min_date_created or max_date_created."), nil, nil
+				}
+				sized := args.MinHeight != nil || args.MaxHeight != nil || args.MinWidth != nil || args.MaxWidth != nil
+				return browseSeries(ctx, client, params, sized, args.StartIndex, limit, noMatches, perVersion)
 			}
 			if byCreated {
 				return browseCreated(ctx, client, params, window, args.StartIndex, limit, noMatches, perVersion)
@@ -869,6 +902,84 @@ func (s createdScan) page(start, end int) []jf.MediaItem {
 // the filtered list here, and the total counts only matching items. When
 // nothing matches, the result's notes end with what noMatches returns, and
 // otherwise with perVersion.
+// seriesTally holds the distinct episodes of one series seen in a scan.
+type seriesTally struct {
+	name     string
+	episodes map[string]struct{}
+}
+
+// tallyEpisodesBySeries walks every episode that params match and groups them
+// by series. Episodes are counted by ID, so a title that Jellyfin lists once
+// per version counts once.
+func tallyEpisodesBySeries(ctx context.Context, client jf.Client, params url.Values) (map[string]*seriesTally, error) {
+	p := maps.Clone(params)
+	p.Del("Fields")
+	tallies := make(map[string]*seriesTally)
+	_, err := jf.EachPage(ctx, client, "/Items", p, func(_ int, items []map[string]any) {
+		for _, m := range items {
+			seriesID := jf.GetString(m, "SeriesId")
+			if seriesID == "" {
+				continue
+			}
+			t := tallies[seriesID]
+			if t == nil {
+				t = &seriesTally{name: jf.GetString(m, "SeriesName"), episodes: make(map[string]struct{})}
+				tallies[seriesID] = t
+			}
+			t.episodes[jf.GetString(m, "Id")] = struct{}{}
+		}
+	})
+	return tallies, err
+}
+
+// browseSeries lists the series that have an episode matching params, each
+// once and by name, with how many of its episodes match and how many it has.
+// The totals come from a second scan without the video size bounds, which
+// only runs when there are bounds to drop.
+func browseSeries(ctx context.Context, client jf.Client, params url.Values, sized bool, startIndex, limit int, noMatches func() []string, perVersion []string) (*mcp.CallToolResult, *jf.ItemListOutput, error) {
+	matching, err := tallyEpisodesBySeries(ctx, client, params)
+	if err != nil {
+		return jf.ErrResult("Jellyfin API error: %v", err), nil, nil
+	}
+	totals := matching
+	if sized && len(matching) > 0 {
+		all := maps.Clone(params)
+		for _, k := range []string{"MinHeight", "MaxHeight", "MinWidth", "MaxWidth"} {
+			all.Del(k)
+		}
+		if totals, err = tallyEpisodesBySeries(ctx, client, all); err != nil {
+			return jf.ErrResult("Jellyfin API error: %v", err), nil, nil
+		}
+	}
+	list := make([]jf.MediaItem, 0, len(matching))
+	for id, t := range matching {
+		item := jf.MediaItem{ID: id, Name: t.name, Type: "Series", MatchingEpisodes: len(t.episodes), TotalEpisodes: len(t.episodes)}
+		if all := totals[id]; all != nil {
+			item.TotalEpisodes = len(all.episodes)
+		}
+		list = append(list, item)
+	}
+	slices.SortFunc(list, func(a, b jf.MediaItem) int {
+		if c := strings.Compare(strings.ToLower(a.Name), strings.ToLower(b.Name)); c != 0 {
+			return c
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
+	total := len(list)
+	start := min(max(startIndex, 0), total)
+	end := min(start+limit, total)
+	output := &jf.ItemListOutput{TotalCount: total, Shown: end - start, Items: list[start:end]}
+	if end < total {
+		output.NextStartIndex = &end
+	}
+	if total == 0 {
+		output.Notes = noMatches()
+	} else {
+		output.Notes = append([]string{"Series are listed once each. matching_episodes counts the episodes that match the filters; total_episodes counts the series' episodes under the other filters."}, perVersion...)
+	}
+	return nil, output, nil
+}
+
 func browseCreated(ctx context.Context, client jf.Client, params url.Values, w createdWindow, startIndex, limit int, noMatches func() []string, perVersion []string) (*mcp.CallToolResult, *jf.ItemListOutput, error) {
 	scan, err := scanCreated(ctx, client, params, w)
 	if err != nil {

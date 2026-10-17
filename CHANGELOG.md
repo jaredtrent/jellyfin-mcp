@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`jellyfin_browse` filters by video size.** `min_width`, `max_width`, `min_height` and `max_height` take pixels, and `is_hd` and `is_4k` take true or false. Width is the better measure of quality: `max_width=720` finds DVD quality or lower, while a height bound over-counts widescreen films cropped short (a 1280x536 encode is 720p but under 576 tall). `is_hd=false` means narrower than 1200 pixels with no HD or 4K version. `is_hd` and `is_4k` also work with `type=Series`, which Jellyfin answers from the series' episodes, so `type=Series` with `is_hd=false` lists the standard-definition shows in one call. The size bounds need `type=Movie` or `type=Episode`; Jellyfin ignores them on a series. A bound of zero or less is refused.
+- **`jellyfin_browse` takes `group_by_series`.** With `type=Episode`, it lists the shows that have a matching episode, each once and by name, with `matching_episodes` and `total_episodes`, instead of listing episodes. Use it for questions such as which shows are DVD quality, with `max_width=720`. It scans every matching episode, twice when a size bound is set, so it takes seconds on a large library. It cannot be combined with `min_date_created` or `max_date_created`.
+
 ## v2026.1015.1
 
 Scans of one library or one changed path, and Go 1.27.2. Thanks to @lz37, whose pull requests #31 and #32 this release builds on.
