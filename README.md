@@ -346,7 +346,7 @@ Beyond tools, jellyfin-mcp implements the MCP features below for clients that su
 
 **Network exposure**: Over stdio, only the local MCP client process reaches the server. Over HTTP, pass `--http-token` whenever the server is reachable beyond localhost. The server refuses to start on an address other than localhost without a token.
 
-**Jellyfin version**: jellyfin-mcp supports Jellyfin 10.11 and 12.x, and logs a warning at startup when the server is older. A few features need Jellyfin 12: filtering by audio or subtitle language, an item's original language, and listing the collections that include an item. The activity log's filters work on both. Jellyfin 12 applies them itself, and on 10.11 jellyfin-mcp applies them to the 2,000 most recent entries.
+**Jellyfin version**: jellyfin-mcp supports Jellyfin 10.11 and 12.x, and logs a warning at startup when the server is older. A few features need Jellyfin 12: filtering by audio or subtitle language, filtering series by `is_hd` or `is_4k`, an item's original language, and listing the collections that include an item. The activity log's filters work on both. Jellyfin 12 applies them itself, and on 10.11 jellyfin-mcp applies them to the 2,000 most recent entries.
 
 **Single binary**: jellyfin-mcp is a statically compiled Go binary with no runtime dependencies. It needs no Node.js, Python, Java, or container runtime. The npm package is a delivery wrapper around the same binary.
 

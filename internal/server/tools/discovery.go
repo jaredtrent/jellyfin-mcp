@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"slices"
@@ -108,6 +109,9 @@ func RegisterDiscoveryTools(server *mcp.Server, client jf.Client, enabled func(s
 				"Genres, studios, cast, and provider IDs are not included. Use jellyfin_get_item for full metadata. " +
 				fmt.Sprintf("Filtering by min_date_created or max_date_created returns items newest first by date added and examines at most the %d most recently added items that match the other filters. ", jf.DefaultMaxItems) +
 				"audio_languages and subtitle_languages filter by track language on Jellyfin 12 or later. " +
+				"is_hd=false finds standard definition (DVD quality or lower) and is_hd=true finds HD without 4K; is_4k=true finds 4K. min_width and max_width set exact cutoffs by width in pixels (max_width=720 is DVD width, but misses DVD rips re-encoded to 854 or 1024 wide), and min_height and max_height filter by height but over-count cropped widescreen encodes. Size filters need type=Movie, Episode, MusicVideo or Video; read total_count for a count. " +
+				"is_hd and is_4k also work with type=Series on Jellyfin 12 or later, where Jellyfin answers from the series' episodes in one call: type=Series with is_hd=false lists shows that have a standard-definition episode. That answer is quick but can leave out shows that qualify, so use group_by_series=true for the complete list. " +
+				"To list the shows with counts of their matching episodes, add group_by_series=true with type=Episode: each series appears once with its matching and total episode counts. " +
 				"For another person's viewing, such as what they watched recently or what they haven't seen, pass their user_id from jellyfin_users list.",
 			Annotations: AnnotReadOnly,
 		}, func(ctx context.Context, req *mcp.CallToolRequest, args jf.BrowseInput) (*mcp.CallToolResult, *jf.ItemListOutput, error) {
@@ -187,6 +191,46 @@ func RegisterDiscoveryTools(server *mcp.Server, client jf.Client, enabled func(s
 			if args.HasSubtitles != nil {
 				params.Set("HasSubtitles", fmt.Sprintf("%v", *args.HasSubtitles))
 			}
+			for _, f := range []struct {
+				name  string
+				value *int
+				param string
+			}{{"min_height", args.MinHeight, "MinHeight"}, {"max_height", args.MaxHeight, "MaxHeight"}, {"min_width", args.MinWidth, "MinWidth"}, {"max_width", args.MaxWidth, "MaxWidth"}} {
+				if f.value == nil {
+					continue
+				}
+				if *f.value <= 0 {
+					return jf.ErrResult("%s must be a positive number of pixels, not %d.", f.name, *f.value), nil, nil
+				}
+				params.Set(f.param, fmt.Sprintf("%d", *f.value))
+			}
+			if args.IsHD != nil {
+				params.Set("IsHD", fmt.Sprintf("%v", *args.IsHD))
+			}
+			if args.Is4K != nil {
+				// Jellyfin reads IsHD and Is4K as buckets to include, and
+				// Is4K=false includes none, so it alone matches nothing.
+				if !*args.Is4K {
+					return jf.ErrResult("is_4k=false matches nothing: Jellyfin treats is_4k as a bucket to include. Use is_hd=true for HD without 4K, or is_hd=false for standard definition."), nil, nil
+				}
+				params.Set("Is4K", "true")
+			}
+			if errResult := checkSizeFilters(ctx, client, args); errResult != nil {
+				return errResult, nil, nil
+			}
+			// Jellyfin gives a video it could not measure, such as a .strm
+			// link, a width and height of 0, which passes every maximum.
+			if args.MaxWidth != nil && args.MinWidth == nil {
+				params.Set("MinWidth", "1")
+			}
+			if args.MaxHeight != nil && args.MinHeight == nil {
+				params.Set("MinHeight", "1")
+			}
+			// Jellyfin 10.11 also counts them as standard definition, where
+			// Jellyfin 12 skips them. A series has no width of its own.
+			if args.IsHD != nil && !*args.IsHD && args.MinWidth == nil && !strings.EqualFold(args.Type, "Series") {
+				params.Set("MinWidth", "1")
+			}
 			audioLangs, subtitleLangs := commaList(args.AudioLanguages), commaList(args.SubtitleLanguages)
 			for _, f := range []struct{ name, given, codes string }{{"audio_languages", args.AudioLanguages, audioLangs}, {"subtitle_languages", args.SubtitleLanguages, subtitleLangs}} {
 				if strings.TrimSpace(f.given) != "" && f.codes == "" {
@@ -232,6 +276,19 @@ func RegisterDiscoveryTools(server *mcp.Server, client jf.Client, enabled func(s
 			}
 			if args.MaxPremiereDate != "" {
 				params.Set("MaxPremiereDate", args.MaxPremiereDate)
+			}
+			if args.GroupBySeries != nil && *args.GroupBySeries {
+				if !strings.EqualFold(args.Type, "Episode") {
+					return jf.ErrResult("group_by_series needs type=Episode: it lists the series that the matching episodes belong to."), nil, nil
+				}
+				if byCreated {
+					return jf.ErrResult("group_by_series cannot be combined with min_date_created or max_date_created."), nil, nil
+				}
+				if args.SortBy != "" || args.SortOrder != "" {
+					return jf.ErrResult("group_by_series lists the series by name, so sort_by and sort_order must be omitted."), nil, nil
+				}
+				sized := args.MinHeight != nil || args.MaxHeight != nil || args.MinWidth != nil || args.MaxWidth != nil || args.IsHD != nil || args.Is4K != nil
+				return browseSeries(ctx, req, client, params, sized, args.StartIndex, limit, noMatches, userNote)
 			}
 			if byCreated {
 				return browseCreated(ctx, client, params, window, args.StartIndex, limit, noMatches, perVersion)
@@ -862,6 +919,123 @@ func (s createdScan) page(start, end int) []jf.MediaItem {
 		items = append(items, item)
 	}
 	return items
+}
+
+// videoTypes are the item types that carry video of their own. Jellyfin
+// records a width and height of 0 for the rest, which passes every maximum.
+var videoTypes = []string{"Movie", "Episode", "MusicVideo", "Video"}
+
+// checkSizeFilters refuses video size filters that would return a wrong
+// answer without an error: a type with no video of its own, or a series on a
+// server older than Jellyfin 12, which tests the series' own width of 0
+// where later versions test its episodes. It returns a result to send back,
+// or nil when the filters are fine.
+func checkSizeFilters(ctx context.Context, client jf.Client, args jf.BrowseInput) *mcp.CallToolResult {
+	pixels := args.MinHeight != nil || args.MaxHeight != nil || args.MinWidth != nil || args.MaxWidth != nil
+	if !pixels && args.IsHD == nil && args.Is4K == nil {
+		return nil
+	}
+	isType := func(t string) bool { return strings.EqualFold(args.Type, t) }
+	allowed := slices.ContainsFunc(videoTypes, isType)
+	if !pixels && isType("Series") {
+		v, err := client.ServerVersion(ctx)
+		if err != nil {
+			return jf.ErrResult("is_hd and is_4k on a series need Jellyfin 12 or later, and the server's version could not be read: %v", err)
+		}
+		if !v.AtLeast(12, 0) {
+			return jf.ErrResult("is_hd and is_4k on a series need Jellyfin 12 or later. This server runs Jellyfin %s. Use type=Episode with group_by_series=true to list the shows instead.", v)
+		}
+		return nil
+	}
+	if !allowed {
+		if pixels {
+			return jf.ErrResult("min_width, max_width, min_height and max_height need type=Movie, Episode, MusicVideo or Video, because other items have no video of their own. To list shows by size, use type=Episode with group_by_series=true.")
+		}
+		return jf.ErrResult("is_hd and is_4k need type=Movie, Episode, MusicVideo or Video, or type=Series on Jellyfin 12 or later, because other items have no video of their own.")
+	}
+	return nil
+}
+
+// seriesTally holds the distinct episodes of one series seen in a scan.
+type seriesTally struct {
+	name     string
+	episodes map[string]struct{}
+}
+
+// tallyEpisodesBySeries walks every episode that params match and groups them
+// by series. Episodes are counted by ID, so a title that Jellyfin lists once
+// per version counts once.
+func tallyEpisodesBySeries(ctx context.Context, req *mcp.CallToolRequest, client jf.Client, params url.Values, what string) (map[string]*seriesTally, error) {
+	p := maps.Clone(params)
+	p.Del("Fields")
+	// The tally reads only IDs and series names.
+	p.Set("EnableImages", "false")
+	p.Set("EnableUserData", "false")
+	tallies := make(map[string]*seriesTally)
+	_, err := jf.EachPage(ctx, client, "/Items", p, func(page int, items []map[string]any) {
+		jf.ReportProgress(ctx, req, float64(page-1), 0, fmt.Sprintf("Scanning %s, page %d...", what, page))
+		for _, m := range items {
+			seriesID := jf.GetString(m, "SeriesId")
+			if seriesID == "" {
+				continue
+			}
+			t := tallies[seriesID]
+			if t == nil {
+				t = &seriesTally{name: jf.GetString(m, "SeriesName"), episodes: make(map[string]struct{})}
+				tallies[seriesID] = t
+			}
+			t.episodes[jf.GetString(m, "Id")] = struct{}{}
+		}
+	})
+	return tallies, err
+}
+
+// browseSeries lists the series that have an episode matching params, each
+// once and by name, with how many of its episodes match and how many it has.
+// The totals come from a second scan without the video size filters, which
+// only runs when there are filters to drop.
+func browseSeries(ctx context.Context, req *mcp.CallToolRequest, client jf.Client, params url.Values, sized bool, startIndex, limit int, noMatches func() []string, perVersion []string) (*mcp.CallToolResult, *jf.ItemListOutput, error) {
+	matching, err := tallyEpisodesBySeries(ctx, req, client, params, "matching episodes")
+	if err != nil {
+		return jf.ErrResult("Jellyfin API error: %v", err), nil, nil
+	}
+	totals := matching
+	if sized && len(matching) > 0 {
+		all := maps.Clone(params)
+		for _, k := range []string{"MinHeight", "MaxHeight", "MinWidth", "MaxWidth", "IsHD", "Is4K"} {
+			all.Del(k)
+		}
+		if totals, err = tallyEpisodesBySeries(ctx, req, client, all, "all episodes"); err != nil {
+			return jf.ErrResult("Jellyfin API error: %v", err), nil, nil
+		}
+	}
+	list := make([]jf.MediaItem, 0, len(matching))
+	for id, t := range matching {
+		item := jf.MediaItem{ID: id, Name: t.name, Type: "Series", MatchingEpisodes: len(t.episodes), TotalEpisodes: len(t.episodes)}
+		if all := totals[id]; all != nil {
+			item.TotalEpisodes = len(all.episodes)
+		}
+		list = append(list, item)
+	}
+	slices.SortFunc(list, func(a, b jf.MediaItem) int {
+		if c := strings.Compare(strings.ToLower(a.Name), strings.ToLower(b.Name)); c != 0 {
+			return c
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
+	total := len(list)
+	start := min(max(startIndex, 0), total)
+	end := min(start+limit, total)
+	output := &jf.ItemListOutput{TotalCount: total, Shown: end - start, Items: list[start:end]}
+	if end < total {
+		output.NextStartIndex = &end
+	}
+	if total == 0 {
+		output.Notes = noMatches()
+	} else {
+		output.Notes = append([]string{"Each series appears once. matching_episodes counts the episodes that match the filters; total_episodes counts the series' episodes under the other filters."}, perVersion...)
+	}
+	return nil, output, nil
 }
 
 // browseCreated answers jellyfin_browse when a creation-date filter is set.

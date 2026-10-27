@@ -2,6 +2,7 @@ package tools_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"net/url"
@@ -801,6 +802,453 @@ func TestBrowse_LanguageFilters(t *testing.T) {
 	}
 	if _, asked := lib.requests["/Items/Filters2"]; asked {
 		t.Error("asked for the library's languages although items matched")
+	}
+}
+
+// The size filters reach Jellyfin as its pixel bounds, and a bound that is not
+// a positive number is refused before any request is sent.
+func TestBrowse_VideoSizeFilters(t *testing.T) {
+	var got url.Values
+	mc := &mockClient{
+		getFunc: func(_ context.Context, endpoint string, params url.Values, dest any) error {
+			got = params
+			return jsonInto(map[string]any{"Items": []map[string]any{}, "TotalRecordCount": 0}, dest)
+		},
+	}
+	result := callTool(t, mc, "", "jellyfin_browse", map[string]any{
+		"type": "Movie", "min_height": 240, "max_height": 576, "min_width": 320, "max_width": 1024,
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", resultText(t, result))
+	}
+	for param, want := range map[string]string{"MinHeight": "240", "MaxHeight": "576", "MinWidth": "320", "MaxWidth": "1024"} {
+		if got.Get(param) != want {
+			t.Errorf("%s = %q, want %q", param, got.Get(param), want)
+		}
+	}
+
+	got = nil
+	callTool(t, mc, "", "jellyfin_browse", map[string]any{"type": "Movie"})
+	for _, param := range []string{"MinHeight", "MaxHeight", "MinWidth", "MaxWidth"} {
+		if got.Has(param) {
+			t.Errorf("%s sent although no size filter was given", param)
+		}
+	}
+}
+
+func TestBrowse_HDAndFourKFilters(t *testing.T) {
+	var got url.Values
+	mc := &mockClient{
+		getFunc: func(_ context.Context, _ string, params url.Values, dest any) error {
+			got = params
+			return jsonInto(map[string]any{"Items": []map[string]any{}, "TotalRecordCount": 0}, dest)
+		},
+	}
+	callTool(t, mc, "", "jellyfin_browse", map[string]any{"type": "Movie", "is_hd": false})
+	if got.Get("IsHD") != "false" || got.Has("Is4K") {
+		t.Errorf("sent IsHD %q and Is4K %q, want false and none", got.Get("IsHD"), got.Get("Is4K"))
+	}
+	callTool(t, mc, "", "jellyfin_browse", map[string]any{"type": "Series", "is_hd": false})
+	if got.Has("MinWidth") {
+		t.Error("MinWidth sent for a series, which has no width of its own")
+	}
+	callTool(t, mc, "", "jellyfin_browse", map[string]any{"type": "Series", "is_hd": true, "is_4k": true})
+	if got.Get("IsHD") != "true" || got.Get("Is4K") != "true" {
+		t.Errorf("sent IsHD %q and Is4K %q, want true and true", got.Get("IsHD"), got.Get("Is4K"))
+	}
+	callTool(t, mc, "", "jellyfin_browse", map[string]any{"type": "Movie"})
+	if got.Has("IsHD") || got.Has("Is4K") {
+		t.Error("IsHD or Is4K sent although neither was given")
+	}
+}
+
+func TestBrowse_VideoSizeFiltersRefuseNonPositiveBounds(t *testing.T) {
+	for _, name := range []string{"min_height", "max_height", "min_width", "max_width"} {
+		t.Run(name, func(t *testing.T) {
+			requests := 0
+			mc := &mockClient{
+				getFunc: func(_ context.Context, endpoint string, _ url.Values, dest any) error {
+					if endpoint == "/Items" {
+						requests++
+					}
+					return jsonInto(map[string]any{"Items": []map[string]any{}, "TotalRecordCount": 0}, dest)
+				},
+			}
+			result := callTool(t, mc, "", "jellyfin_browse", map[string]any{"type": "Movie", name: 0})
+			if text := resultText(t, result); !result.IsError || !strings.Contains(text, name+" must be a positive number") {
+				t.Errorf("got %s", text)
+			}
+			if requests != 0 {
+				t.Errorf("%d item requests were sent", requests)
+			}
+		})
+	}
+}
+
+// group_by_series lists each show once with the episodes that match and the
+// episodes it has. A title that Jellyfin lists twice counts once, and the
+// second scan for the totals leaves the size filters out.
+func TestBrowse_GroupBySeries(t *testing.T) {
+	ep := func(id, seriesID, series string) map[string]any {
+		return map[string]any{"Id": id, "SeriesId": seriesID, "SeriesName": series, "Type": "Episode"}
+	}
+	var scans []url.Values
+	mc := &mockClient{
+		getFunc: func(_ context.Context, endpoint string, params url.Values, dest any) error {
+			if endpoint != "/Items" {
+				return jsonInto(map[string]any{}, dest)
+			}
+			scans = append(scans, params)
+			items := []map[string]any{
+				ep("e1", "s-b", "Show B"), ep("e2", "s-b", "Show B"), ep("e2", "s-b", "Show B"),
+				ep("e3", "s-a", "show A"),
+			}
+			if params.Get("MaxHeight") == "" {
+				items = append(items, ep("e4", "s-a", "show A"), ep("e5", "s-a", "show A"), ep("e6", "s-c", "Show C"))
+			}
+			return jsonInto(map[string]any{"Items": items, "TotalRecordCount": len(items)}, dest)
+		},
+	}
+	result := callTool(t, mc, "", "jellyfin_browse", map[string]any{"type": "Episode", "max_height": 576, "group_by_series": true})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", resultText(t, result))
+	}
+	out := structured[jf.ItemListOutput](t, result)
+	if out.TotalCount != 2 || len(out.Items) != 2 {
+		t.Fatalf("got %d series (%d listed), want 2: %+v", out.TotalCount, len(out.Items), out.Items)
+	}
+	a, b := out.Items[0], out.Items[1]
+	if a.ID != "s-a" || a.Name != "show A" || a.Type != "Series" || a.MatchingEpisodes != 1 || a.TotalEpisodes != 3 {
+		t.Errorf("first = %+v, want s-a, show A, Series, 1 of 3", a)
+	}
+	if b.ID != "s-b" || b.MatchingEpisodes != 2 || b.TotalEpisodes != 2 {
+		t.Errorf("second = %+v, want s-b with 2 matching of 2 (the repeated e2 counts once)", b)
+	}
+	if len(scans) != 2 || scans[0].Get("MaxHeight") != "576" || scans[1].Has("MaxHeight") {
+		t.Errorf("scans = %v, want one with MaxHeight=576 and one without", scans)
+	}
+}
+
+func TestBrowse_GroupBySeriesPages(t *testing.T) {
+	mc := &mockClient{
+		getFunc: func(_ context.Context, _ string, _ url.Values, dest any) error {
+			items := []map[string]any{}
+			for _, n := range []string{"A", "B", "C"} {
+				items = append(items, map[string]any{"Id": "e" + n, "SeriesId": "s" + n, "SeriesName": "Show " + n})
+			}
+			return jsonInto(map[string]any{"Items": items, "TotalRecordCount": len(items)}, dest)
+		},
+	}
+	result := callTool(t, mc, "", "jellyfin_browse", map[string]any{"type": "Episode", "group_by_series": true, "limit": 2})
+	out := structured[jf.ItemListOutput](t, result)
+	if out.TotalCount != 3 || out.Shown != 2 || out.NextStartIndex == nil || *out.NextStartIndex != 2 {
+		t.Errorf("got %+v, want 3 series, 2 shown, next page at 2", out)
+	}
+}
+
+// Without a size bound the matching episodes are all the episodes, so one
+// scan serves both counts; with one, the totals scan keeps every filter except the size ones. A maximum
+// also sends a minimum of 1, and the totals scan drops that too.
+func TestBrowse_GroupBySeriesScans(t *testing.T) {
+	run := func(args map[string]any) []url.Values {
+		var scans []url.Values
+		mc := &mockClient{
+			getFunc: func(_ context.Context, _ string, params url.Values, dest any) error {
+				scans = append(scans, params)
+				items := []map[string]any{{"Id": "e1", "SeriesId": "s1", "SeriesName": "Show A"}, {"Id": "e2", "Name": "No series"}}
+				return jsonInto(map[string]any{"Items": items, "TotalRecordCount": len(items)}, dest)
+			},
+		}
+		if result := callTool(t, mc, "", "jellyfin_browse", args); result.IsError {
+			t.Fatalf("unexpected error: %s", resultText(t, result))
+		}
+		return scans
+	}
+
+	if scans := run(map[string]any{"type": "Episode", "group_by_series": true}); len(scans) != 1 {
+		t.Errorf("%d scans without a size bound, want 1", len(scans))
+	}
+
+	scans := run(map[string]any{"type": "Episode", "group_by_series": true, "max_width": 720, "is_hd": false, "parent_id": "lib-1", "is_played": false})
+	if len(scans) != 2 {
+		t.Fatalf("%d scans with a size bound, want 2", len(scans))
+	}
+	for i, want := range []bool{true, false} {
+		for _, param := range []string{"MaxWidth", "MinWidth", "IsHD"} {
+			if scans[i].Has(param) != want {
+				t.Errorf("scan %d %s present = %v, want %v", i, param, scans[i].Has(param), want)
+			}
+		}
+		if scans[i].Get("EnableImages") != "false" || scans[i].Get("EnableUserData") != "false" {
+			t.Errorf("scan %d did not turn off images and user data: %v", i, scans[i])
+		}
+		if scans[i].Get("ParentId") != "lib-1" || scans[i].Get("IsPlayed") != "false" || scans[i].Get("IncludeItemTypes") != "Episode" {
+			t.Errorf("scan %d lost a filter: %v", i, scans[i])
+		}
+	}
+}
+
+func TestBrowse_GroupBySeriesWithNoMatches(t *testing.T) {
+	scans := 0
+	mc := &mockClient{
+		getFunc: func(_ context.Context, _ string, _ url.Values, dest any) error {
+			scans++
+			return jsonInto(map[string]any{"Items": []map[string]any{}, "TotalRecordCount": 0}, dest)
+		},
+	}
+	result := callTool(t, mc, "", "jellyfin_browse", map[string]any{"type": "Episode", "group_by_series": true, "max_width": 100})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", resultText(t, result))
+	}
+	out := structured[jf.ItemListOutput](t, result)
+	if out.TotalCount != 0 || len(out.Items) != 0 {
+		t.Errorf("got %+v, want no series", out)
+	}
+	if scans != 1 {
+		t.Errorf("%d scans, want 1: with no matching series there are no totals to look up", scans)
+	}
+}
+
+// A failed scan, whichever one, is an error and not a list built from half
+// the episodes.
+func TestBrowse_GroupBySeriesScanFailure(t *testing.T) {
+	for failOn := 1; failOn <= 2; failOn++ {
+		t.Run(fmt.Sprintf("scan %d", failOn), func(t *testing.T) {
+			scans := 0
+			mc := &mockClient{
+				getFunc: func(_ context.Context, _ string, _ url.Values, dest any) error {
+					scans++
+					if scans == failOn {
+						return errors.New("server unavailable")
+					}
+					items := []map[string]any{{"Id": "e1", "SeriesId": "s1", "SeriesName": "Show A"}}
+					return jsonInto(map[string]any{"Items": items, "TotalRecordCount": 1}, dest)
+				},
+			}
+			result := callTool(t, mc, "", "jellyfin_browse", map[string]any{"type": "Episode", "group_by_series": true, "max_width": 720})
+			if text := resultText(t, result); !result.IsError || !strings.Contains(text, "server unavailable") {
+				t.Errorf("got %s", text)
+			}
+		})
+	}
+}
+
+// A maximum alone would pass videos that Jellyfin could not measure, which it
+// records as 0 wide and 0 tall, so the matching minimum of 1 goes with it. A
+// minimum the caller gave stays.
+func TestBrowse_MaximumComesWithMinimumOfOne(t *testing.T) {
+	var got url.Values
+	mc := &mockClient{
+		getFunc: func(_ context.Context, _ string, params url.Values, dest any) error {
+			got = params
+			return jsonInto(map[string]any{"Items": []map[string]any{}, "TotalRecordCount": 0}, dest)
+		},
+	}
+	for name, tc := range map[string]struct {
+		args                                     map[string]any
+		minWidth, maxWidth, minHeight, maxHeight string
+	}{
+		"max width":                {map[string]any{"max_width": 720}, "1", "720", "", ""},
+		"max height":               {map[string]any{"max_height": 576}, "", "", "1", "576"},
+		"given minimums":           {map[string]any{"max_width": 720, "min_width": 300, "max_height": 576, "min_height": 200}, "300", "720", "200", "576"},
+		"minimum only":             {map[string]any{"min_width": 1280}, "1280", "", "", ""},
+		"standard definition":      {map[string]any{"is_hd": false}, "1", "", "", ""},
+		"standard definition, min": {map[string]any{"is_hd": false, "min_width": 300}, "300", "", "", ""},
+		"HD":                       {map[string]any{"is_hd": true}, "", "", "", ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			args := map[string]any{"type": "Movie"}
+			maps.Copy(args, tc.args)
+			callTool(t, mc, "", "jellyfin_browse", args)
+			for param, want := range map[string]string{"MinWidth": tc.minWidth, "MaxWidth": tc.maxWidth, "MinHeight": tc.minHeight, "MaxHeight": tc.maxHeight} {
+				if got.Get(param) != want {
+					t.Errorf("%s = %q, want %q", param, got.Get(param), want)
+				}
+			}
+		})
+	}
+}
+
+func TestBrowse_RefusesFourKFalse(t *testing.T) {
+	requests := 0
+	mc := &mockClient{
+		getFunc: func(_ context.Context, endpoint string, _ url.Values, dest any) error {
+			if endpoint == "/Items" {
+				requests++
+			}
+			return jsonInto(map[string]any{"Items": []map[string]any{}, "TotalRecordCount": 0}, dest)
+		},
+	}
+	for _, args := range []map[string]any{
+		{"type": "Movie", "is_4k": false},
+		{"type": "Movie", "is_hd": true, "is_4k": false},
+	} {
+		result := callTool(t, mc, "", "jellyfin_browse", args)
+		if text := resultText(t, result); !result.IsError || !strings.Contains(text, "is_4k=false matches nothing") || !strings.Contains(text, "is_hd=true") {
+			t.Errorf("%v: got %s", args, text)
+		}
+	}
+	if requests != 0 {
+		t.Errorf("%d item requests were sent", requests)
+	}
+}
+
+// Jellyfin records no video for songs, folders, seasons, and the like, so a
+// size filter on them, or on no type at all, would count them all.
+func TestBrowse_SizeFiltersNeedATypeWithVideo(t *testing.T) {
+	for name, tc := range map[string]struct {
+		args map[string]any
+		want string
+	}{
+		"max width, no type":  {map[string]any{"max_width": 720}, "need type=Movie, Episode, MusicVideo or Video"},
+		"min height, no type": {map[string]any{"min_height": 720}, "need type=Movie, Episode, MusicVideo or Video"},
+		"width on audio":      {map[string]any{"type": "Audio", "max_width": 720}, "need type=Movie, Episode, MusicVideo or Video"},
+		"width on a series":   {map[string]any{"type": "Series", "max_width": 720}, "group_by_series=true"},
+		"width on a season":   {map[string]any{"type": "Season", "min_width": 720}, "group_by_series=true"},
+		"is_hd, no type":      {map[string]any{"is_hd": false}, "need type=Movie, Episode, MusicVideo or Video, or type=Series"},
+		"is_4k, no type":      {map[string]any{"is_4k": true}, "need type=Movie, Episode, MusicVideo or Video, or type=Series"},
+		"is_hd on a box set":  {map[string]any{"type": "BoxSet", "is_hd": true}, "need type=Movie, Episode, MusicVideo or Video, or type=Series"},
+		"is_hd with a width":  {map[string]any{"type": "Series", "is_hd": true, "max_width": 720}, "group_by_series=true"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			requests := 0
+			mc := &mockClient{
+				getFunc: func(_ context.Context, endpoint string, _ url.Values, dest any) error {
+					if endpoint == "/Items" {
+						requests++
+					}
+					return jsonInto(map[string]any{"Items": []map[string]any{}, "TotalRecordCount": 0}, dest)
+				},
+			}
+			result := callTool(t, mc, "", "jellyfin_browse", tc.args)
+			if text := resultText(t, result); !result.IsError || !strings.Contains(text, tc.want) {
+				t.Errorf("got %s", text)
+			}
+			if requests != 0 {
+				t.Errorf("%d item requests were sent", requests)
+			}
+		})
+	}
+	for _, typ := range []string{"Movie", "Episode", "MusicVideo", "Video", "movie"} {
+		mc := &mockClient{
+			getFunc: func(_ context.Context, _ string, _ url.Values, dest any) error {
+				return jsonInto(map[string]any{"Items": []map[string]any{}, "TotalRecordCount": 0}, dest)
+			},
+		}
+		if result := callTool(t, mc, "", "jellyfin_browse", map[string]any{"type": typ, "max_width": 720, "is_hd": false}); result.IsError {
+			t.Errorf("type %s refused: %s", typ, resultText(t, result))
+		}
+	}
+}
+
+// Before Jellyfin 12 a series has a width of 0 of its own, so is_hd and
+// is_4k on one would list every show as standard definition.
+func TestBrowse_HDAndFourKOnSeriesNeedJellyfin12(t *testing.T) {
+	for _, args := range []map[string]any{
+		{"type": "Series", "is_hd": false},
+		{"type": "Series", "is_4k": true},
+	} {
+		requests := 0
+		mc := &mockClient{
+			serverVersion: "10.11.6",
+			getFunc: func(_ context.Context, endpoint string, _ url.Values, dest any) error {
+				if endpoint == "/Items" {
+					requests++
+				}
+				return jsonInto(map[string]any{"Items": []map[string]any{}, "TotalRecordCount": 0}, dest)
+			},
+		}
+		result := callTool(t, mc, "", "jellyfin_browse", args)
+		if text := resultText(t, result); !result.IsError || !strings.Contains(text, "need Jellyfin 12 or later. This server runs Jellyfin 10.11.6.") {
+			t.Errorf("%v on 10.11: got %s", args, text)
+		}
+		if requests != 0 {
+			t.Errorf("%v on 10.11 browsed anyway", args)
+		}
+	}
+	// Episodes need no version: they have video of their own.
+	mc := &mockClient{
+		serverVersion: "10.11.6",
+		getFunc: func(_ context.Context, _ string, _ url.Values, dest any) error {
+			return jsonInto(map[string]any{"Items": []map[string]any{}, "TotalRecordCount": 0}, dest)
+		},
+	}
+	if result := callTool(t, mc, "", "jellyfin_browse", map[string]any{"type": "Episode", "is_hd": false}); result.IsError {
+		t.Errorf("episodes on 10.11: %s", resultText(t, result))
+	}
+}
+
+// When the server's version cannot be read, a series filter is refused with
+// the reason, and not sent to a server that may answer it wrongly.
+func TestBrowse_HDOnSeriesRefusedWhenVersionUnreadable(t *testing.T) {
+	requests := 0
+	mc := &mockClient{
+		serverVersion: "not a version",
+		getFunc: func(_ context.Context, endpoint string, _ url.Values, dest any) error {
+			if endpoint == "/Items" {
+				requests++
+			}
+			return jsonInto(map[string]any{"Items": []map[string]any{}, "TotalRecordCount": 0}, dest)
+		},
+	}
+	result := callTool(t, mc, "", "jellyfin_browse", map[string]any{"type": "Series", "is_hd": false})
+	if text := resultText(t, result); !result.IsError || !strings.Contains(text, "need Jellyfin 12 or later, and the server's version could not be read") {
+		t.Errorf("got %s", text)
+	}
+	if requests != 0 {
+		t.Errorf("%d item requests were sent", requests)
+	}
+}
+
+// When the filter is is_hd, the totals scan has to leave it out, or a show
+// with three standard-definition episodes of 40 reports three of three.
+func TestBrowse_GroupBySeriesTotalsIgnoreHD(t *testing.T) {
+	mc := &mockClient{
+		getFunc: func(_ context.Context, _ string, params url.Values, dest any) error {
+			items := []map[string]any{{"Id": "e1", "SeriesId": "s1", "SeriesName": "Show A"}, {"Id": "e2", "SeriesId": "s1", "SeriesName": "Show A"}, {"Id": "e3", "SeriesId": "s1", "SeriesName": "Show A"}}
+			if !params.Has("IsHD") {
+				for i := 4; i <= 40; i++ {
+					items = append(items, map[string]any{"Id": fmt.Sprintf("e%d", i), "SeriesId": "s1", "SeriesName": "Show A"})
+				}
+			}
+			return jsonInto(map[string]any{"Items": items, "TotalRecordCount": len(items)}, dest)
+		},
+	}
+	out := structured[jf.ItemListOutput](t, callTool(t, mc, "", "jellyfin_browse", map[string]any{"type": "Episode", "is_hd": false, "group_by_series": true}))
+	if len(out.Items) != 1 || out.Items[0].MatchingEpisodes != 3 || out.Items[0].TotalEpisodes != 40 {
+		t.Errorf("got %+v, want one series with 3 of 40 episodes", out.Items)
+	}
+}
+
+func TestBrowse_GroupBySeriesRefusals(t *testing.T) {
+	for name, tc := range map[string]struct {
+		args map[string]any
+		want string
+	}{
+		"not episodes": {map[string]any{"type": "Movie", "group_by_series": true}, "needs type=Episode"},
+		"no type":      {map[string]any{"group_by_series": true}, "needs type=Episode"},
+		"date window":  {map[string]any{"type": "Episode", "group_by_series": true, "min_date_created": "2024-01-01"}, "cannot be combined"},
+		"sort by":      {map[string]any{"type": "Episode", "group_by_series": true, "sort_by": "DateCreated"}, "sort_by and sort_order must be omitted"},
+		"sort order":   {map[string]any{"type": "Episode", "group_by_series": true, "sort_order": "Descending"}, "sort_by and sort_order must be omitted"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			requests := 0
+			mc := &mockClient{
+				getFunc: func(_ context.Context, endpoint string, _ url.Values, dest any) error {
+					if endpoint == "/Items" {
+						requests++
+					}
+					return jsonInto(map[string]any{"Items": []map[string]any{}, "TotalRecordCount": 0}, dest)
+				},
+			}
+			result := callTool(t, mc, "", "jellyfin_browse", tc.args)
+			if text := resultText(t, result); !result.IsError || !strings.Contains(text, tc.want) {
+				t.Errorf("got %s", text)
+			}
+			if requests != 0 {
+				t.Errorf("%d item requests were sent", requests)
+			}
+		})
 	}
 }
 

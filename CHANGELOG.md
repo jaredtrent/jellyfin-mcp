@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`jellyfin_browse` filters by video size.** `is_hd=false` finds standard definition, or DVD quality: video narrower than 1200 pixels with no HD or 4K version. `is_hd=true` finds HD without 4K, and `is_4k=true` finds 4K. The tool refuses `is_4k=false`, because Jellyfin then matches nothing. `min_width`, `max_width`, `min_height` and `max_height` take pixels for an exact cutoff. Width is the better measure: a height bound over-counts widescreen films cropped short (a 1280x536 encode is 720p but under 576 tall), and `max_width=720` misses DVD rips re-encoded to 854 or 1024 wide. A maximum, and `is_hd=false`, leave out videos that Jellyfin could not measure, such as `.strm` links. The size filters need `type=Movie`, `Episode`, `MusicVideo` or `Video`, and the tool refuses a bound of zero or less. `is_hd` and `is_4k` also work with `type=Series` on Jellyfin 12 or later, which answers from the series' episodes in one call: `type=Series` with `is_hd=false` lists shows that have a standard-definition episode, so a show with SD and HD episodes can appear under both values. That answer is quick but can leave out shows that qualify (on one 12.2.0 library, 125 shows against 131 from the roll-up), so use `group_by_series` for the complete list.
+- **`jellyfin_browse` takes `group_by_series`.** With `type=Episode`, it lists the shows that have a matching episode, each once and by name, with `matching_episodes` and `total_episodes`, instead of listing episodes. Use it for questions such as which shows are standard definition, with `is_hd=false`, or to find shows by an exact width or height. It sorts by name, so it refuses `sort_by` and `sort_order`. It scans every matching episode, twice when a size filter is set, so it takes seconds on a large library. It cannot be combined with `min_date_created` or `max_date_created`.
+
 ## v2026.1015.1
 
 Scans of one library or one changed path, and Go 1.27.2. Thanks to @lz37, whose pull requests #31 and #32 this release builds on.
