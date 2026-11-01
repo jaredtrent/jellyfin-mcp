@@ -70,22 +70,34 @@ type NowPlayingInfo struct {
 }
 
 type PlayStateInfo struct {
-	IsPaused        bool  `json:"is_paused" jsonschema:"Whether playback is paused"`
-	PositionSeconds int64 `json:"position_seconds,omitempty" jsonschema:"Playback position in seconds"`
-	PositionTicks   int64 `json:"position_ticks,omitempty" jsonschema:"Playback position in ticks, the value jellyfin_playback_control Seek takes"`
-	Volume          int   `json:"volume,omitempty" jsonschema:"Volume level from 0 to 100"`
+	PlayMethod      string `json:"play_method,omitempty" jsonschema:"Playback method reported by Jellyfin"`
+	IsPaused        bool   `json:"is_paused" jsonschema:"Whether playback is paused"`
+	PositionSeconds int64  `json:"position_seconds,omitempty" jsonschema:"Playback position in seconds"`
+	PositionTicks   int64  `json:"position_ticks,omitempty" jsonschema:"Playback position in ticks, the value jellyfin_playback_control Seek takes"`
+	Volume          int    `json:"volume,omitempty" jsonschema:"Volume level from 0 to 100"`
+}
+
+type TranscodingInfo struct {
+	VideoCodec       string   `json:"video_codec,omitempty" jsonschema:"Reported output video codec"`
+	AudioCodec       string   `json:"audio_codec,omitempty" jsonschema:"Reported output audio codec"`
+	Container        string   `json:"container,omitempty" jsonschema:"Reported output container"`
+	Bitrate          *int     `json:"bitrate,omitempty" jsonschema:"Reported output bitrate"`
+	IsVideoDirect    *bool    `json:"is_video_direct,omitempty" jsonschema:"Whether video is copied"`
+	IsAudioDirect    *bool    `json:"is_audio_direct,omitempty" jsonschema:"Whether audio is copied"`
+	TranscodeReasons []string `json:"transcode_reasons,omitempty" jsonschema:"Reported transcode reasons"`
 }
 
 type SessionInfo struct {
-	SessionID            string          `json:"session_id" jsonschema:"Session ID, which jellyfin_playback_control and jellyfin_play take"`
-	User                 string          `json:"user" jsonschema:"The signed-in user"`
-	Client               string          `json:"client" jsonschema:"Client application"`
-	DeviceName           string          `json:"device_name" jsonschema:"Device name"`
-	SupportsMediaControl bool            `json:"supports_media_control" jsonschema:"Whether the client accepts remote playback commands from jellyfin_play and jellyfin_playback_control"`
-	LastActivity         string          `json:"last_activity" jsonschema:"Last activity, in the server's time zone"`
-	Status               string          `json:"status" jsonschema:"playing when the session is playing an item, otherwise connected"`
-	NowPlaying           *NowPlayingInfo `json:"now_playing,omitempty" jsonschema:"The item being played"`
-	PlayState            *PlayStateInfo  `json:"play_state,omitempty" jsonschema:"Playback state of the item being played"`
+	SessionID            string           `json:"session_id" jsonschema:"Session ID, which jellyfin_playback_control and jellyfin_play take"`
+	User                 string           `json:"user" jsonschema:"The signed-in user"`
+	Client               string           `json:"client" jsonschema:"Client application"`
+	DeviceName           string           `json:"device_name" jsonschema:"Device name"`
+	SupportsMediaControl bool             `json:"supports_media_control" jsonschema:"Whether the client accepts remote playback commands from jellyfin_play and jellyfin_playback_control"`
+	LastActivity         string           `json:"last_activity" jsonschema:"Last activity, in the server's time zone"`
+	Status               string           `json:"status" jsonschema:"playing when the session is playing an item, otherwise connected"`
+	NowPlaying           *NowPlayingInfo  `json:"now_playing,omitempty" jsonschema:"The item being played"`
+	PlayState            *PlayStateInfo   `json:"play_state,omitempty" jsonschema:"Playback state of the item being played"`
+	TranscodingInfo      *TranscodingInfo `json:"transcoding_info,omitempty" jsonschema:"Reported transcoding details"`
 }
 
 // SessionsOutput serves both jellyfin_sessions actions: list fills Sessions

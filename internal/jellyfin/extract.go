@@ -308,6 +308,7 @@ func SessionFrom(s map[string]any) SessionInfo {
 	session.NowPlaying = nowPlaying
 	if ps := ToMap(s["PlayState"]); ps != nil {
 		playState := &PlayStateInfo{IsPaused: GetBool(ps, "IsPaused")}
+		playState.PlayMethod, _ = ps["PlayMethod"].(string)
 		if pos := GetInt64(ps, "PositionTicks"); pos > 0 {
 			playState.PositionSeconds = pos / TicksPerSecond
 			playState.PositionTicks = pos
@@ -316,6 +317,24 @@ func SessionFrom(s map[string]any) SessionInfo {
 			playState.Volume = vol
 		}
 		session.PlayState = playState
+	}
+	if reportedTranscodingInfo := ToMap(s["TranscodingInfo"]); reportedTranscodingInfo != nil {
+		transcodingInfo := &TranscodingInfo{
+			TranscodeReasons: ToStringSlice(reportedTranscodingInfo["TranscodeReasons"]),
+		}
+		if reportedBitrate, ok := reportedTranscodingInfo["Bitrate"].(float64); ok && reportedBitrate >= 0 && reportedBitrate <= 2147483647 {
+			transcodingInfo.Bitrate = GetIntPtr(reportedTranscodingInfo, "Bitrate")
+		}
+		transcodingInfo.VideoCodec, _ = reportedTranscodingInfo["VideoCodec"].(string)
+		transcodingInfo.AudioCodec, _ = reportedTranscodingInfo["AudioCodec"].(string)
+		transcodingInfo.Container, _ = reportedTranscodingInfo["Container"].(string)
+		if isVideoDirect, ok := reportedTranscodingInfo["IsVideoDirect"].(bool); ok {
+			transcodingInfo.IsVideoDirect = BoolPtr(isVideoDirect)
+		}
+		if isAudioDirect, ok := reportedTranscodingInfo["IsAudioDirect"].(bool); ok {
+			transcodingInfo.IsAudioDirect = BoolPtr(isAudioDirect)
+		}
+		session.TranscodingInfo = transcodingInfo
 	}
 	return session
 }
