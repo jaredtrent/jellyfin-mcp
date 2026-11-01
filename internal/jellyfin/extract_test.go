@@ -925,8 +925,15 @@ func TestSessionFrom(t *testing.T) {
 				},
 				"PlayState": map[string]any{
 					"IsPaused":      false,
+					"PlayMethod":    "Transcode",
 					"PositionTicks": float64(3600 * int64(TicksPerSecond)), // 1 hour
 					"VolumeLevel":   float64(75),
+				},
+				"TranscodingInfo": map[string]any{
+					"VideoCodec": "h264", "AudioCodec": "aac", "Container": "ts",
+					"Bitrate": float64(0), "IsVideoDirect": false, "IsAudioDirect": true,
+					"TranscodeReasons": []any{"VideoCodecNotSupported"},
+					"UnrelatedField":   "not included",
 				},
 			},
 			expect: map[string]any{
@@ -945,9 +952,15 @@ func TestSessionFrom(t *testing.T) {
 				},
 				"play_state": map[string]any{
 					"is_paused":        false,
+					"play_method":      "Transcode",
 					"position_seconds": int64(3600*TicksPerSecond) / TicksPerSecond,
 					"position_ticks":   int64(3600 * TicksPerSecond),
 					"volume":           75,
+				},
+				"transcoding_info": map[string]any{
+					"video_codec": "h264", "audio_codec": "aac", "container": "ts",
+					"bitrate": 0, "is_video_direct": false, "is_audio_direct": true,
+					"transcode_reasons": []string{"VideoCodecNotSupported"},
 				},
 			},
 		},
@@ -955,6 +968,8 @@ func TestSessionFrom(t *testing.T) {
 			name: "idle session without NowPlayingItem",
 			input: map[string]any{
 				"Id":               "sess-002",
+				"PlayState":        map[string]any{"PlayMethod": "Transcode"},
+				"TranscodingInfo":  map[string]any{"IsVideoDirect": false},
 				"UserName":         "bob",
 				"Client":           "Android TV",
 				"DeviceName":       "Living Room TV",
@@ -985,6 +1000,7 @@ func TestSessionFrom(t *testing.T) {
 				},
 				"PlayState": map[string]any{
 					"IsPaused":      true,
+					"PlayMethod":    "DirectPlay",
 					"PositionTicks": float64(0),
 					"VolumeLevel":   float64(0),
 				},
@@ -1003,7 +1019,8 @@ func TestSessionFrom(t *testing.T) {
 					"type": "Movie",
 				},
 				"play_state": map[string]any{
-					"is_paused": true,
+					"is_paused":   true,
+					"play_method": "DirectPlay",
 				},
 			},
 		},
@@ -1043,6 +1060,21 @@ func TestSessionFrom(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			assertJSONEqual(t, SessionFrom(tc.input), tc.expect)
 		})
+	}
+}
+
+func TestSessionTranscodingBitrateRange(t *testing.T) {
+	for reportedBitrate, expectedInRange := range map[float64]bool{
+		0: true, 4000000: true, 2147483647: true,
+		1.5: true, -1: false, 2147483648: false, 1e100: false,
+	} {
+		session := SessionFrom(map[string]any{
+			"NowPlayingItem":  map[string]any{},
+			"TranscodingInfo": map[string]any{"Bitrate": reportedBitrate},
+		})
+		if parsedBitrate := session.TranscodingInfo.Bitrate; (parsedBitrate != nil) != expectedInRange {
+			t.Errorf("reported bitrate %v: accepted=%t, want %t", reportedBitrate, parsedBitrate != nil, expectedInRange)
+		}
 	}
 }
 
