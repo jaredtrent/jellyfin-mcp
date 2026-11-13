@@ -112,7 +112,7 @@ type CollectionsInput struct {
 // --- Playback & Sessions ---
 
 type SessionsInput struct {
-	Action string `json:"action" jsonschema:"Action: list (all active sessions with now-playing info and session IDs), resume (items with in-progress playback)"`
+	Action string `json:"action" jsonschema:"Action: list (all active sessions with now-playing, playback method, transcoding details, and session IDs), resume (items with in-progress playback)"`
 	Limit  int    `json:"limit,omitempty" jsonschema:"Maximum resume items (default 100)"`
 }
 

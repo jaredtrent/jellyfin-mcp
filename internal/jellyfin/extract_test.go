@@ -925,8 +925,19 @@ func TestSessionFrom(t *testing.T) {
 				},
 				"PlayState": map[string]any{
 					"IsPaused":      false,
+					"PlayMethod":    "Transcode",
 					"PositionTicks": float64(3600 * int64(TicksPerSecond)), // 1 hour
 					"VolumeLevel":   float64(75),
+				},
+				"TranscodingInfo": map[string]any{
+					"VideoCodec":               "hevc",
+					"AudioCodec":               "aac",
+					"Container":                "mp4",
+					"Bitrate":                  float64(1500000),
+					"IsVideoDirect":            false,
+					"IsAudioDirect":            true,
+					"HardwareAccelerationType": "none",
+					"TranscodeReasons":         []any{"VideoCodecNotSupported", "ContainerBitrateExceedsLimit"},
 				},
 			},
 			expect: map[string]any{
@@ -945,9 +956,73 @@ func TestSessionFrom(t *testing.T) {
 				},
 				"play_state": map[string]any{
 					"is_paused":        false,
+					"play_method":      "Transcode",
 					"position_seconds": int64(3600*TicksPerSecond) / TicksPerSecond,
 					"position_ticks":   int64(3600 * TicksPerSecond),
 					"volume":           75,
+				},
+				"transcoding_info": map[string]any{
+					"video_codec":       "hevc",
+					"audio_codec":       "aac",
+					"container":         "mp4",
+					"bitrate_kbps":      int64(1500),
+					"is_video_direct":   false,
+					"is_audio_direct":   true,
+					"transcode_reasons": []string{"VideoCodecNotSupported", "ContainerBitrateExceedsLimit"},
+				},
+			},
+		},
+		{
+			name: "remux session with stream copy and zero bitrate omits bitrate_kbps",
+			input: map[string]any{
+				"Id":               "sess-remux",
+				"UserName":         "alice",
+				"Client":           "Jellyfin Web",
+				"DeviceName":       "Safari",
+				"LastActivityDate": "2024-08-01T12:30:45.0000000Z",
+				"NowPlayingItem": map[string]any{
+					"Id":   "item-88",
+					"Name": "Harbor Lights",
+					"Type": "Episode",
+				},
+				"PlayState": map[string]any{
+					"IsPaused":   false,
+					"PlayMethod": "Transcode",
+				},
+				"TranscodingInfo": map[string]any{
+					"VideoCodec":       "h264",
+					"AudioCodec":       "aac",
+					"Container":        "mp4",
+					"Bitrate":          float64(0),
+					"IsVideoDirect":    true,
+					"IsAudioDirect":    true,
+					"TranscodeReasons": []any{"ContainerNotSupported"},
+				},
+			},
+			expect: map[string]any{
+				"session_id":             "sess-remux",
+				"user":                   "alice",
+				"client":                 "Jellyfin Web",
+				"device_name":            "Safari",
+				"supports_media_control": false,
+				"last_activity":          "2024-08-01T21:30:45+09:00",
+				"status":                 "playing",
+				"now_playing": map[string]any{
+					"id":   "item-88",
+					"name": "Harbor Lights",
+					"type": "Episode",
+				},
+				"play_state": map[string]any{
+					"is_paused":   false,
+					"play_method": "Transcode",
+				},
+				"transcoding_info": map[string]any{
+					"video_codec":       "h264",
+					"audio_codec":       "aac",
+					"container":         "mp4",
+					"is_video_direct":   true,
+					"is_audio_direct":   true,
+					"transcode_reasons": []string{"ContainerNotSupported"},
 				},
 			},
 		},
@@ -955,6 +1030,8 @@ func TestSessionFrom(t *testing.T) {
 			name: "idle session without NowPlayingItem",
 			input: map[string]any{
 				"Id":               "sess-002",
+				"PlayState":        map[string]any{"PlayMethod": "Transcode"},
+				"TranscodingInfo":  map[string]any{"IsVideoDirect": false},
 				"UserName":         "bob",
 				"Client":           "Android TV",
 				"DeviceName":       "Living Room TV",
@@ -985,6 +1062,7 @@ func TestSessionFrom(t *testing.T) {
 				},
 				"PlayState": map[string]any{
 					"IsPaused":      true,
+					"PlayMethod":    "DirectPlay",
 					"PositionTicks": float64(0),
 					"VolumeLevel":   float64(0),
 				},
@@ -1003,7 +1081,8 @@ func TestSessionFrom(t *testing.T) {
 					"type": "Movie",
 				},
 				"play_state": map[string]any{
-					"is_paused": true,
+					"is_paused":   true,
+					"play_method": "DirectPlay",
 				},
 			},
 		},
@@ -1043,6 +1122,25 @@ func TestSessionFrom(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			assertJSONEqual(t, SessionFrom(tc.input), tc.expect)
 		})
+	}
+}
+
+func TestSessionTranscodingBitrateKbps(t *testing.T) {
+	for bps, wantKbps := range map[float64]int64{
+		-1:       0,
+		0:        0,
+		999:      0,
+		1000:     1,
+		1500000:  1500,
+		25000000: 25000,
+	} {
+		session := SessionFrom(map[string]any{
+			"NowPlayingItem":  map[string]any{},
+			"TranscodingInfo": map[string]any{"Bitrate": bps},
+		})
+		if got := session.TranscodingInfo.BitrateKbps; got != wantKbps {
+			t.Errorf("Bitrate %v bps: got %d kbps, want %d", bps, got, wantKbps)
+		}
 	}
 }
 

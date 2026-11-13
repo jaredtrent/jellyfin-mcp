@@ -73,22 +73,34 @@ type NowPlayingInfo struct {
 }
 
 type PlayStateInfo struct {
-	IsPaused        bool  `json:"is_paused" jsonschema:"Whether playback is paused"`
-	PositionSeconds int64 `json:"position_seconds,omitempty" jsonschema:"Playback position in seconds"`
-	PositionTicks   int64 `json:"position_ticks,omitempty" jsonschema:"Playback position in ticks, the value jellyfin_playback_control Seek takes"`
-	Volume          int   `json:"volume,omitempty" jsonschema:"Volume level from 0 to 100"`
+	PlayMethod      string `json:"play_method,omitempty" jsonschema:"DirectPlay, DirectStream, or Transcode; Jellyfin also reports Transcode when remuxing, so check transcoding_info"`
+	IsPaused        bool   `json:"is_paused" jsonschema:"Whether playback is paused"`
+	PositionSeconds int64  `json:"position_seconds,omitempty" jsonschema:"Playback position in seconds"`
+	PositionTicks   int64  `json:"position_ticks,omitempty" jsonschema:"Playback position in ticks, the value jellyfin_playback_control Seek takes"`
+	Volume          int    `json:"volume,omitempty" jsonschema:"Volume level from 0 to 100"`
+}
+
+type TranscodingInfo struct {
+	VideoCodec       string   `json:"video_codec,omitempty" jsonschema:"Output video codec"`
+	AudioCodec       string   `json:"audio_codec,omitempty" jsonschema:"Output audio codec"`
+	Container        string   `json:"container,omitempty" jsonschema:"Output container"`
+	BitrateKbps      int64    `json:"bitrate_kbps,omitempty" jsonschema:"Output bitrate in kbps"`
+	IsVideoDirect    bool     `json:"is_video_direct" jsonschema:"Whether the video stream is copied without re-encoding"`
+	IsAudioDirect    bool     `json:"is_audio_direct" jsonschema:"Whether the audio stream is copied without re-encoding"`
+	TranscodeReasons []string `json:"transcode_reasons,omitempty" jsonschema:"Why the stream is remuxed or transcoded, such as VideoCodecNotSupported or ContainerBitrateExceedsLimit"`
 }
 
 type SessionInfo struct {
-	SessionID            string          `json:"session_id" jsonschema:"Session ID, which jellyfin_playback_control and jellyfin_play take"`
-	User                 string          `json:"user" jsonschema:"The signed-in user"`
-	Client               string          `json:"client" jsonschema:"Client application"`
-	DeviceName           string          `json:"device_name" jsonschema:"Device name"`
-	SupportsMediaControl bool            `json:"supports_media_control" jsonschema:"Whether the client accepts remote playback commands from jellyfin_play and jellyfin_playback_control"`
-	LastActivity         string          `json:"last_activity" jsonschema:"Last activity, in the server's time zone"`
-	Status               string          `json:"status" jsonschema:"playing when the session is playing an item, otherwise connected"`
-	NowPlaying           *NowPlayingInfo `json:"now_playing,omitempty" jsonschema:"The item being played"`
-	PlayState            *PlayStateInfo  `json:"play_state,omitempty" jsonschema:"Playback state of the item being played"`
+	SessionID            string           `json:"session_id" jsonschema:"Session ID, which jellyfin_playback_control and jellyfin_play take"`
+	User                 string           `json:"user" jsonschema:"The signed-in user"`
+	Client               string           `json:"client" jsonschema:"Client application"`
+	DeviceName           string           `json:"device_name" jsonschema:"Device name"`
+	SupportsMediaControl bool             `json:"supports_media_control" jsonschema:"Whether the client accepts remote playback commands from jellyfin_play and jellyfin_playback_control"`
+	LastActivity         string           `json:"last_activity" jsonschema:"Last activity, in the server's time zone"`
+	Status               string           `json:"status" jsonschema:"playing when the session is playing an item, otherwise connected"`
+	NowPlaying           *NowPlayingInfo  `json:"now_playing,omitempty" jsonschema:"The item being played"`
+	PlayState            *PlayStateInfo   `json:"play_state,omitempty" jsonschema:"Playback state of the item being played"`
+	TranscodingInfo      *TranscodingInfo `json:"transcoding_info,omitempty" jsonschema:"Output stream and transcode reasons when FFmpeg remuxes or transcodes; absent for direct play"`
 }
 
 // SessionsOutput serves both jellyfin_sessions actions: list fills Sessions

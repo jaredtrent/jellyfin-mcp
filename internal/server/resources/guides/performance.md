@@ -41,7 +41,7 @@ Media can stay on mechanical disks, because streaming reads sequentially. Over N
 ## Monitoring
 
 - `jellyfin_system_info action=info` reports the server version. It doesn't report hardware, so ask which CPU or GPU the server uses.
-- `jellyfin_sessions action=list` shows who is playing what on which client. It doesn't show whether a stream transcodes; the dashboard's active sessions do.
+- `jellyfin_sessions action=list` shows who is playing what on which client, whether each stream plays directly, remuxes, or transcodes, and why it transcodes. It doesn't show whether the transcode runs on the CPU or GPU; the `encoding` config and the `FFmpeg.*.log` files do.
 - `jellyfin_analytics action=codec_report` finds the codecs and resolutions that force transcoding, for movies by default or TV episodes with `type=Episode`. `jellyfin_browse` with `is_4k`, `is_hd`, `min_width`, or `group_by_series` lists the matching titles or shows.
 - `jellyfin_item_extras action=playback_info` checks whether one item plays directly.
 - `jellyfin_system_info action=log_file` shows FFmpeg errors and warnings.

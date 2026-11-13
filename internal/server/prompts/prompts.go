@@ -276,6 +276,7 @@ func RegisterPrompts(server *mcp.Server, _ jf.Client) {
 			"1. Use jellyfin_sessions action=\"list\" to get all active sessions\n" +
 			"2. Present a dashboard for each session showing: user name, device/client name, " +
 			"what's playing (title, type, season/episode for TV), playback state (playing/paused), " +
+			"playback method (direct play, remux, or transcode, with output codecs and transcode reasons when present), " +
 			"and progress (current position / total duration)\n" +
 			"3. If no sessions are active, say so and suggest checking jellyfin_devices action=\"list\" " +
 			"to see recently connected devices"
@@ -317,7 +318,7 @@ func RegisterPrompts(server *mcp.Server, _ jf.Client) {
 			instruction += fmt.Sprintf(
 				"4. The user reported this issue: \"%s\". Run the checks below that fit it; an issue can fit more than one group:\n", issue) +
 				"   - A title that won't play, stops, stutters, buffers, or transcodes:\n" +
-				"     - jellyfin_sessions action=\"list\" to check active playback sessions\n" +
+				"     - jellyfin_sessions action=\"list\" to check active playback sessions, including play_method and transcoding_info (codecs, bitrate_kbps, is_video_direct, is_audio_direct, and transcode_reasons)\n" +
 				"     - If the issue names a title, find it with jellyfin_search, then jellyfin_item_extras action=\"playback_info\" with its item_id to see whether it direct plays or transcodes and why\n" +
 				"     - If the issue names a person, find their user_id with jellyfin_users action=\"list\", then jellyfin_system_info action=\"activity_log\" with that user_id (and the item_id, if known) for their playback starts, stops, and failures\n" +
 				"     - jellyfin_system_info action=\"logs\" lists the FFmpeg logs (named FFmpeg.*.log), one per transcode; read the newest with action=\"log_file\" for the ffmpeg error\n" +

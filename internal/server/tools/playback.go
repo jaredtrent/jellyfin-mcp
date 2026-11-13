@@ -24,6 +24,7 @@ func RegisterPlaybackTools(server *mcp.Server, client jf.Client, enabled func(st
 				"action": {"list", "resume"},
 			}),
 			Description: "View active playback sessions and resumable items. Use action 'list' to see all connected clients, what they're playing, " +
+				"whether each stream plays directly, remuxes, or transcodes (with output codecs, bitrate, and transcode reasons), " +
 				"and their session IDs (needed for jellyfin_playback_control and jellyfin_play). " +
 				"Use action 'resume' to see items with in-progress playback that can be continued. " +
 				"Session IDs change when clients reconnect, so always list sessions before sending playback commands.",

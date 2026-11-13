@@ -35,6 +35,19 @@ func TestSessions_List(t *testing.T) {
 							"Name": "Neon Cascade",
 							"Type": "Movie",
 						},
+						"PlayState": map[string]any{
+							"IsPaused":   false,
+							"PlayMethod": "Transcode",
+						},
+						"TranscodingInfo": map[string]any{
+							"VideoCodec":       "hevc",
+							"AudioCodec":       "aac",
+							"Container":        "mp4",
+							"Bitrate":          float64(1500000),
+							"IsVideoDirect":    false,
+							"IsAudioDirect":    true,
+							"TranscodeReasons": []any{"VideoCodecNotSupported"},
+						},
 					},
 				}, dest)
 			}
@@ -57,7 +70,13 @@ func TestSessions_List(t *testing.T) {
 	if playing.SessionID != "session-1" || playing.Status != "playing" || playing.NowPlaying == nil || playing.NowPlaying.Name != "Neon Cascade" {
 		t.Errorf("sessions[0] = %+v, want session-1 playing Neon Cascade", playing)
 	}
-	if idle.SessionID != "session-2" || idle.Status != "connected" || idle.NowPlaying != nil {
+	if playing.PlayState == nil || playing.PlayState.PlayMethod != "Transcode" {
+		t.Errorf("sessions[0].play_state = %+v, want play_method Transcode", playing.PlayState)
+	}
+	if ti := playing.TranscodingInfo; ti == nil || ti.VideoCodec != "hevc" || ti.AudioCodec != "aac" || ti.Container != "mp4" || ti.BitrateKbps != 1500 || ti.IsVideoDirect || !ti.IsAudioDirect || len(ti.TranscodeReasons) != 1 || ti.TranscodeReasons[0] != "VideoCodecNotSupported" {
+		t.Errorf("sessions[0].transcoding_info = %+v, want hevc/aac/mp4 at 1500 kbps with VideoCodecNotSupported", ti)
+	}
+	if idle.SessionID != "session-2" || idle.Status != "connected" || idle.NowPlaying != nil || idle.PlayState != nil || idle.TranscodingInfo != nil {
 		t.Errorf("sessions[1] = %+v, want session-2 connected with nothing playing", idle)
 	}
 }

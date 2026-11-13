@@ -315,7 +315,10 @@ func SessionFrom(s map[string]any) SessionInfo {
 	}
 	session.NowPlaying = nowPlaying
 	if ps := ToMap(s["PlayState"]); ps != nil {
-		playState := &PlayStateInfo{IsPaused: GetBool(ps, "IsPaused")}
+		playState := &PlayStateInfo{
+			PlayMethod: GetString(ps, "PlayMethod"),
+			IsPaused:   GetBool(ps, "IsPaused"),
+		}
 		if pos := GetInt64(ps, "PositionTicks"); pos > 0 {
 			playState.PositionSeconds = pos / TicksPerSecond
 			playState.PositionTicks = pos
@@ -324,6 +327,20 @@ func SessionFrom(s map[string]any) SessionInfo {
 			playState.Volume = vol
 		}
 		session.PlayState = playState
+	}
+	if ti := ToMap(s["TranscodingInfo"]); ti != nil {
+		transcoding := &TranscodingInfo{
+			VideoCodec:       GetString(ti, "VideoCodec"),
+			AudioCodec:       GetString(ti, "AudioCodec"),
+			Container:        GetString(ti, "Container"),
+			IsVideoDirect:    GetBool(ti, "IsVideoDirect"),
+			IsAudioDirect:    GetBool(ti, "IsAudioDirect"),
+			TranscodeReasons: ToStringSlice(ti["TranscodeReasons"]),
+		}
+		if br := GetInt64(ti, "Bitrate"); br > 0 {
+			transcoding.BitrateKbps = br / UnitsPerKilo
+		}
+		session.TranscodingInfo = transcoding
 	}
 	return session
 }
