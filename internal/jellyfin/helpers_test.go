@@ -1445,3 +1445,40 @@ func TestApplyMetadataFields_WritesOnlyFieldsTheUpdateEndpointReads(t *testing.T
 		t.Errorf("GenreItems = %v, want the fetched value left unchanged", got)
 	}
 }
+
+func TestApplyMetadataFields_StripsResponseOnlyPlaybackFields(t *testing.T) {
+	people := []any{map[string]any{"Name": "Actor A", "Type": "Actor"}}
+	providerIDs := map[string]any{"Tmdb": "12345"}
+	current := map[string]any{
+		"Id":          "ep-1",
+		"Name":        "Pilot",
+		"Overview":    "Old overview",
+		"People":      people,
+		"ProviderIds": providerIDs,
+		"Trickplay": map[string]any{
+			"ep-1": map[string]any{
+				"320": map[string]any{"Width": 320, "Height": 180},
+			},
+		},
+		"MediaStreams": []any{map[string]any{"Type": "Video", "Codec": "hevc"}},
+		"MediaSources": []any{map[string]any{"Id": "ep-1", "Container": "mkv"}},
+		"Chapters":     []any{map[string]any{"Name": "Chapter 1", "StartPositionTicks": float64(0)}},
+	}
+
+	ApplyMetadataFields(current, MetadataInput{Overview: "Updated overview"})
+
+	for _, stripped := range []string{"Trickplay", "MediaStreams", "MediaSources", "Chapters"} {
+		if got, exists := current[stripped]; exists {
+			t.Errorf("%s = %v, want key deleted", stripped, got)
+		}
+	}
+	if got := current["Overview"]; got != "Updated overview" {
+		t.Errorf("Overview = %v, want %q", got, "Updated overview")
+	}
+	if got := current["People"]; !reflect.DeepEqual(got, people) {
+		t.Errorf("People = %v, want %v", got, people)
+	}
+	if got := current["ProviderIds"]; !reflect.DeepEqual(got, providerIDs) {
+		t.Errorf("ProviderIds = %v, want %v", got, providerIDs)
+	}
+}

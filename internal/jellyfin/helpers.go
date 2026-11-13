@@ -405,6 +405,11 @@ func FilterPrefix(items []string, prefix string) []string {
 // projection of Genres that the endpoint ignores, and TagItems is not a
 // BaseItemDto property.
 func ApplyMetadataFields(current map[string]any, args MetadataInput) {
+	// Strip response-only playback/media properties (such as Trickplay nested maps)
+	// that cause Jellyfin's POST /Items/{id} deserializer to return HTTP 500 on Episodes/Movies.
+	for _, roKey := range []string{"Trickplay", "MediaStreams", "MediaSources", "Chapters"} {
+		delete(current, roKey)
+	}
 	if args.Name != "" {
 		current["Name"] = args.Name
 	}
