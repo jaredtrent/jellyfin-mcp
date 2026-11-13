@@ -321,7 +321,7 @@ func RegisterPrompts(server *mcp.Server, _ jf.Client) {
 				"     - If the issue names a title, find it with jellyfin_search, then jellyfin_item_extras action=\"playback_info\" with its item_id to see whether it direct plays or transcodes and why\n" +
 				"     - If the issue names a person, find their user_id with jellyfin_users action=\"list\", then jellyfin_system_info action=\"activity_log\" with that user_id (and the item_id, if known) for their playback starts, stops, and failures\n" +
 				"     - jellyfin_system_info action=\"logs\" lists the FFmpeg logs (named FFmpeg.*.log), one per transcode; read the newest with action=\"log_file\" for the ffmpeg error\n" +
-				"     - jellyfin_analytics action=\"codec_report\" to identify transcoding-heavy codecs\n" +
+				"     - jellyfin_analytics action=\"codec_report\" to identify transcoding-heavy codecs and resolutions, adding type=\"Episode\" when the issue is with TV shows\n" +
 				"     - Reference jellyfin://guides/transcoding for hardware transcoding setup\n" +
 				"   - A client that can't connect, or a server that can't be reached from outside the home network:\n" +
 				"     - jellyfin_server action=\"get_config_section\" key=\"network\" for the base URL, ports, and remote access settings\n" +
@@ -452,7 +452,7 @@ func RegisterPrompts(server *mcp.Server, _ jf.Client) {
 	server.AddPrompt(&mcp.Prompt{
 		Name:        "library-report",
 		Title:       "Library Report",
-		Description: "Comprehensive library analytics report: stats, codecs, unplayed items, recent additions, and duplicates",
+		Description: "Comprehensive library analytics report: stats, codecs, resolutions, unplayed items, recent additions, and duplicates",
 		Arguments: []*mcp.PromptArgument{
 			{Name: "library", Description: "Library name to report on (optional, all libraries if omitted)"},
 		},
@@ -461,17 +461,17 @@ func RegisterPrompts(server *mcp.Server, _ jf.Client) {
 
 		instruction := "Generate a comprehensive library analytics report. Follow these steps:\n"
 		if library != "" {
-			instruction += fmt.Sprintf("1. Use jellyfin_libraries to find the library ID for \"%s\"\n", library)
+			instruction += fmt.Sprintf("1. Use jellyfin_libraries to find the library ID and collection type for \"%s\"\n", library)
 			instruction += "2. Gather all analytics data in parallel using the parent_id:\n"
 			instruction += "   - jellyfin_analytics action=\"library_stats\" for item counts by type\n"
-			instruction += "   - jellyfin_analytics action=\"codec_report\" for codec/resolution distribution\n"
+			instruction += "   - jellyfin_analytics action=\"codec_report\" for codec/resolution distribution (pass type=\"Episode\" for a TV library or type=\"Audio\" for a music library)\n"
 			instruction += "   - jellyfin_analytics action=\"never_played\" for unplayed items\n"
 			instruction += "   - jellyfin_analytics action=\"recently_added\" for recent additions\n"
 			instruction += "   - jellyfin_analytics action=\"duplicate_check\" for potential duplicates\n"
 		} else {
 			instruction += "1. Gather all analytics data in parallel:\n"
 			instruction += "   - jellyfin_analytics action=\"library_stats\" for item counts by type\n"
-			instruction += "   - jellyfin_analytics action=\"codec_report\" for codec/resolution distribution\n"
+			instruction += "   - jellyfin_analytics action=\"codec_report\" for movie codec/resolution distribution, and a second call with type=\"Episode\" for TV episodes\n"
 			instruction += "   - jellyfin_analytics action=\"never_played\" for unplayed items\n"
 			instruction += "   - jellyfin_analytics action=\"recently_added\" for recent additions\n"
 			instruction += "   - jellyfin_analytics action=\"duplicate_check\" for potential duplicates\n"
@@ -482,7 +482,7 @@ func RegisterPrompts(server *mcp.Server, _ jf.Client) {
 			"- Number of never-played items\n" +
 			"- Recent additions summary\n" +
 			"- Any duplicate items found\n" +
-			"- Recommendations, such as codecs that force transcoding and items to clean up"
+			"- Recommendations, such as codecs that force transcoding and items to clean up; offer to list specific SD, HD, 4K, or 8K titles or shows with jellyfin_browse"
 
 		return &mcp.GetPromptResult{
 			Description: "Library analytics report",
@@ -584,12 +584,12 @@ func RegisterPrompts(server *mcp.Server, _ jf.Client) {
 
 		instruction := "Analyze media codecs and optimize transcoding settings. Follow these steps:\n"
 		if library != "" {
-			instruction += fmt.Sprintf("1. Use jellyfin_libraries to find the library ID for \"%s\"\n", library)
+			instruction += fmt.Sprintf("1. Use jellyfin_libraries to find the library ID and collection type for \"%s\"\n", library)
 			instruction += "2. Gather data in parallel using the parent_id:\n"
 		} else {
 			instruction += "1. Gather data in parallel:\n"
 		}
-		instruction += "   - jellyfin_analytics action=\"codec_report\" for codec/resolution distribution\n" +
+		instruction += "   - jellyfin_analytics action=\"codec_report\" for codec/resolution distribution (pass type=\"Episode\" for TV libraries or run both Movie and Episode when scanning all libraries)\n" +
 			"   - jellyfin_server action=\"get_config_section\" key=\"encoding\" for current transcoding settings\n" +
 			"   - jellyfin_system_info action=\"info\" for the server version. It does not report hardware, so ask me which CPU or GPU the server uses\n"
 		step := 3
@@ -598,7 +598,7 @@ func RegisterPrompts(server *mcp.Server, _ jf.Client) {
 		}
 		instruction += fmt.Sprintf("%d. Analyze the codec distribution and identify:\n", step) +
 			"   - Codecs that require transcoding on most clients, such as HEVC on older devices\n" +
-			"   - Resolution distribution and bandwidth implications\n" +
+			"   - Resolution distribution and bandwidth implications, using jellyfin_browse with is_4k, is_hd, or group_by_series=true when listing specific titles or shows helps\n" +
 			"   - Audio codecs that may need transcoding\n"
 		instruction += fmt.Sprintf("%d. Compare with current hardware transcoding settings and suggest optimizations:\n", step+1) +
 			"   - Recommend a hardware acceleration method based on the CPU or GPU I describe\n" +

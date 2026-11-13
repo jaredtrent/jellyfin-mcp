@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -23,9 +24,19 @@ func RegisterAnalyticsTools(server *mcp.Server, client jf.Client, enabled func(s
 			InputSchema: jf.WithEnums[jf.AnalyticsInput](map[string][]any{
 				"action": {"library_stats", "library_size", "size_report", "codec_report", "never_played", "recently_added", "duplicate_check", "played_status"},
 			}),
-			Description: "Library analytics and reports. All actions are read-only. Use parent_id to scope to a specific library.",
+			Description: "Read-only library analytics and reports; set parent_id to scope to one library. " +
+				"codec_report counts codecs, containers, HDR, and resolution tiers (default Movie; pass type=Episode for TV or Audio for music); use jellyfin_browse to list matching items or shows.",
 			Annotations: AnnotReadOnly,
 		}, func(ctx context.Context, req *mcp.CallToolRequest, args jf.AnalyticsInput) (*mcp.CallToolResult, *jf.AnalyticsOutput, error) {
+			var codecType string
+			if args.Action == "codec_report" {
+				var errRes *mcp.CallToolResult
+				codecType, errRes = codecReportType(args.Type)
+				if errRes != nil {
+					return errRes, nil, nil
+				}
+			}
+
 			userID, err := client.GetUserID(ctx)
 			if err != nil {
 				return jf.ErrResult("Jellyfin error: %v", err), nil, nil
@@ -68,13 +79,9 @@ func RegisterAnalyticsTools(server *mcp.Server, client jf.Client, enabled func(s
 				return nil, out, nil
 
 			case "codec_report":
-				itemType := args.Type
-				if itemType == "" {
-					itemType = "Movie"
-				}
 				params := url.Values{
 					"UserId":           {userID},
-					"IncludeItemTypes": {itemType},
+					"IncludeItemTypes": {codecType},
 					"Recursive":        {"true"},
 					"Fields":           {"MediaSources"},
 				}
@@ -114,27 +121,18 @@ func RegisterAnalyticsTools(server *mcp.Server, client jf.Client, enabled func(s
 									if codec := jf.GetString(stm, "Codec"); codec != "" {
 										videoCodecs[strings.ToLower(codec)]++
 									}
-									if w := jf.GetInt(stm, "Width"); w > 0 {
-										h := jf.GetInt(stm, "Height")
-										var res string
-										switch {
-										case w >= 3840:
-											res = "4K (2160p)"
-										case w >= 1920:
-											res = "1080p"
-										case w >= 1280:
-											res = "720p"
-										case w >= 720:
-											res = "480p"
-										default:
-											res = fmt.Sprintf("%dx%d", w, h)
-										}
-										resolutions[res]++
+									w, h := jf.GetInt(stm, "Width"), jf.GetInt(stm, "Height")
+									if w > 0 || h > 0 {
+										resolutions[videoResolutionClass(w, h)]++
 									}
-									// HDR and bit depth
-									if vr := jf.GetString(stm, "VideoRangeType"); vr != "" {
+									// HDR and bit depth: Jellyfin's VideoRangeType enum defaults
+									// to "Unknown", so fall back to VideoRange when it is unknown
+									// while keeping "Unknown" when neither is known.
+									if vr := jf.GetString(stm, "VideoRangeType"); vr != "" && vr != "Unknown" {
 										videoRanges[vr]++
 									} else if vr := jf.GetString(stm, "VideoRange"); vr != "" {
+										videoRanges[vr]++
+									} else if vr := jf.GetString(stm, "VideoRangeType"); vr != "" {
 										videoRanges[vr]++
 									}
 									if bd := jf.GetInt(stm, "BitDepth"); bd > 0 {
@@ -153,7 +151,7 @@ func RegisterAnalyticsTools(server *mcp.Server, client jf.Client, enabled func(s
 					return jf.ErrResult("Jellyfin API error: %v", err), nil, nil
 				}
 
-				return nil, &jf.AnalyticsOutput{CodecReport: &jf.CodecDistribution{
+				out := &jf.AnalyticsOutput{CodecReport: &jf.CodecDistribution{
 					TotalMediaSources: total,
 					VideoCodecs:       videoCodecs,
 					AudioCodecs:       audioCodecs,
@@ -161,7 +159,15 @@ func RegisterAnalyticsTools(server *mcp.Server, client jf.Client, enabled func(s
 					Resolutions:       resolutions,
 					VideoRanges:       videoRanges,
 					BitDepths:         bitDepths,
-				}}, nil
+				}}
+				if total == 0 && args.Type == "" {
+					if args.ParentID != "" {
+						out.Notes = []string{"No Movie media files were found in this library (codec_report defaults to type=Movie). Pass type=Episode for a TV library or type=Audio for a music library."}
+					} else {
+						out.Notes = []string{"codec_report defaults to type=Movie, and no Movie media files were found. Pass type=Episode for TV episodes or type=Audio for music tracks."}
+					}
+				}
+				return nil, out, nil
 
 			case "never_played":
 				maxItems := jf.ClampInt(args.Limit, 500, jf.MaxLimitCap)
@@ -561,4 +567,59 @@ func unreadUsersNote(names []string) []string {
 		return nil
 	}
 	return []string{fmt.Sprintf("The play state of %s could not be read, usually because the item is in a library they can't see, so %s left out.", strings.Join(names, ", "), plural(len(names), "that user is", "those users are"))}
+}
+
+// containerItemTypes are item types that group other items and never carry
+// media files of their own.
+var containerItemTypes = []string{
+	"Series", "Season", "MusicAlbum", "MusicArtist", "BoxSet", "Playlist", "Folder", "CollectionFolder",
+}
+
+// codecReportType normalizes and validates the item type filter for
+// codec_report, defaulting an omitted type to Movie and refusing container
+// types that have no media files of their own.
+func codecReportType(raw string) (string, *mcp.CallToolResult) {
+	if raw == "" {
+		return "Movie", nil
+	}
+	itemType := commaList(raw)
+	if itemType == "" {
+		return "", jf.ErrResult("type must name at least one file-bearing item type (Movie, Episode, Audio, MusicVideo, or Video).")
+	}
+	for _, e := range strings.Split(itemType, ",") {
+		if slices.ContainsFunc(containerItemTypes, func(c string) bool { return strings.EqualFold(e, c) }) {
+			return "", jf.ErrResult("codec_report needs a file-bearing type (Movie, Episode, Audio, MusicVideo, or Video), not %q, which has no media files of its own. Use type=Movie for movies, type=Episode for TV shows, or type=Audio for music.", e)
+		}
+	}
+	return itemType, nil
+}
+
+// videoResolutionClass maps stream pixel dimensions to a resolution class,
+// normalizing portrait videos so horizontal videos check (width, height) and
+// vertical videos check (height, width). Each class uses simple width or
+// height ranges so cropped widescreen encodes and 4:3 transfers stay in their
+// class; the 4K (3800/2100), 1080p (1800/1000), and 720p (1200/700) floors
+// match Jellyfin's web badge and Radarr/Sonarr quality tiers.
+func videoResolutionClass(w, h int) string {
+	if w > 0 && h > w {
+		w, h = h, w
+	}
+	switch {
+	case w >= 7600 || h >= 4200:
+		return "8K (4320p)"
+	case w >= 3800 || h >= 2100:
+		return "4K (2160p)"
+	case w >= 2500 || h >= 1400:
+		return "1440p"
+	case w >= 1800 || h >= 1000:
+		return "1080p"
+	case w >= 1200 || h >= 700:
+		return "720p"
+	case w >= 1000 || h >= 550:
+		return "576p"
+	case w >= 700 || h >= 460:
+		return "480p"
+	default:
+		return "SD (<480p)"
+	}
 }

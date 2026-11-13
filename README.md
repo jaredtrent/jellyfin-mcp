@@ -18,7 +18,7 @@ jellyfin-mcp is a fan project. It isn't associated with the Jellyfin project or 
 ## What It Does
 
 - **Find and play media**: Search the library and start playback on any connected client.
-- **Browse and filter**: Narrow by genre, year, studio, actor, rating, played status, and more.
+- **Browse and filter**: Narrow by genre, year, studio, actor, rating, language, video resolution, played status, and more.
 - **Recommend**: Suggest titles from your own library, never from an external site.
 - **Control playback**: Play, pause, seek, stop, set the volume, and skip on any device.
 - **Manage playlists and collections**: Create, edit, and deduplicate playlists and box sets.
@@ -27,7 +27,7 @@ jellyfin-mcp is a fan project. It isn't associated with the Jellyfin project or 
 - **Fix metadata**: Correct titles, genres, ratings, and images, in batches or one item at a time, and re-identify items.
 - **Troubleshoot the server**: Read the server log, find failed tasks, and diagnose playback problems.
 - **Administer the server**: Manage users, library scans, scheduled tasks, plugins, devices, and backups.
-- **Report on the library**: Watch history, codec reports, duplicate detection, and library statistics.
+- **Report on the library**: Watch history, codec and resolution reports, duplicate detection, and library statistics.
 - **Live TV and DVR**: Guide data, channels, recordings, and series timers.
 - **SyncPlay help**: A guide and a prompt for setting up and troubleshooting watch-together groups.
 
@@ -306,7 +306,7 @@ The 31 tools form eight groups. Registering only the groups you need, with `--to
 | `admin` | 8 | System, users, libraries, tasks, plugins, devices, server configuration |
 | `content` | 4 | Metadata, subtitles, images, video versions |
 | `livetv` | 2 | Channels, guide, recordings, DVR |
-| `analytics` | 1 | Statistics, codec reports, duplicates |
+| `analytics` | 1 | Statistics, codec and resolution reports, duplicates |
 
 For a search-and-play setup, start with `--toolsets discovery,media,playback`. Add `user` for playlists and collections, or `admin` for server maintenance. See [tools](internal/server/tools) for every tool with its description.
 
@@ -346,7 +346,7 @@ Beyond tools, jellyfin-mcp implements the MCP features below for clients that su
 
 **Network exposure**: Over stdio, only the local MCP client process reaches the server. Over HTTP, pass `--http-token` whenever the server is reachable beyond localhost. The server refuses to start on an address other than localhost without a token.
 
-**Jellyfin version**: jellyfin-mcp supports Jellyfin 10.11 and 12.x, and logs a warning at startup when the server is older. A few features need Jellyfin 12: filtering by audio or subtitle language, an item's original language, and listing the collections that include an item. The activity log's filters work on both. Jellyfin 12 applies them itself, and on 10.11 jellyfin-mcp applies them to the 2,000 most recent entries.
+**Jellyfin version**: jellyfin-mcp supports Jellyfin 10.11 and 12.x, and logs a warning at startup when the server is older. A few features need Jellyfin 12: filtering by audio or subtitle language, filtering series by resolution, showing an item's original language, and showing which collections an item belongs to. Activity log filters work on both: Jellyfin 12 filters on the server, and on 10.11 jellyfin-mcp scans the 2,000 newest entries.
 
 **Single binary**: jellyfin-mcp is a statically compiled Go binary with no runtime dependencies. It needs no Node.js, Python, Java, or container runtime. The npm package is a delivery wrapper around the same binary.
 

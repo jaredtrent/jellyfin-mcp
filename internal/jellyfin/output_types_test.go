@@ -49,6 +49,18 @@ func TestOutputs_AlwaysPresentFields(t *testing.T) {
 			present: []string{`"items":[]`},
 		},
 		{
+			name:    "media item without group_by_series counts",
+			value:   MediaItem{ID: "m1", Name: "Movie", Type: "Movie"},
+			present: []string{`"id":"m1"`, `"name":"Movie"`, `"type":"Movie"`},
+			absent:  []string{`"matching_episodes"`, `"total_episodes"`, `"resolution"`},
+		},
+		{
+			name:    "series item from group_by_series",
+			value:   MediaItem{ID: "s1", Name: "Show", Type: "Series", MatchingEpisodes: 3, TotalEpisodes: 10},
+			present: []string{`"matching_episodes":3`, `"total_episodes":10`},
+			absent:  []string{`"resolution"`},
+		},
+		{
 			name:    "sessions list with no sessions",
 			value:   SessionsOutput{Sessions: &[]SessionInfo{}},
 			present: []string{`"sessions":[]`},

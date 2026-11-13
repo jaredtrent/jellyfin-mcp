@@ -34,6 +34,7 @@ var typedCalls = []typedCall{
 	{tool: "jellyfin_browse", args: map[string]any{}, want: emptyPage()},
 	{tool: "jellyfin_browse", args: map[string]any{"min_date_created": "2020-01-01"}, want: emptyPage()},
 	{tool: "jellyfin_browse", args: map[string]any{"sort_by": "DatePlayed"}, want: emptyPage()},
+	{tool: "jellyfin_browse", args: map[string]any{"type": "Episode", "group_by_series": true}, want: emptyPage()},
 	{tool: "jellyfin_get_item", args: map[string]any{"item_id": "item-1"}, want: map[string]any{"id": "item-1"}},
 	{tool: "jellyfin_recommendations", args: map[string]any{"action": "next_up"}, want: map[string]any{"items": []any{}}},
 	{tool: "jellyfin_recommendations", args: map[string]any{"action": "suggestions"}, want: map[string]any{"items": []any{}}},

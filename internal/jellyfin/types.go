@@ -11,8 +11,8 @@ type SearchInput struct {
 }
 
 type BrowseInput struct {
-	ParentID          string   `json:"parent_id,omitempty" jsonschema:"Library or folder ID to browse within. Get IDs from jellyfin_libraries"`
-	Type              string   `json:"type,omitempty" jsonschema:"Filter by item type: Movie, Series, Episode, Audio, MusicAlbum, BoxSet, Playlist (several types as a comma-separated list)"`
+	ParentID          string   `json:"parent_id,omitempty" jsonschema:"Library, series, season, or folder ID to browse within (from jellyfin_libraries, jellyfin_search, or jellyfin_browse)"`
+	Type              string   `json:"type,omitempty" jsonschema:"Filter by item type: Movie, Series, Episode, MusicVideo, Video, Audio, MusicAlbum, BoxSet, or Playlist (several types as a comma-separated list)"`
 	Genre             string   `json:"genre,omitempty" jsonschema:"Filter by genre name, such as Action, Comedy, Drama, Sci-Fi (several genres separated by |)"`
 	Year              *int     `json:"year,omitempty" jsonschema:"Filter by production year"`
 	Studio            string   `json:"studio,omitempty" jsonschema:"Filter by studio name (several separated by |)"`
@@ -25,10 +25,17 @@ type BrowseInput struct {
 	MinRating         *float64 `json:"min_community_rating,omitempty" jsonschema:"Minimum community rating filter (0.0 to 10.0)"`
 	OfficialRating    string   `json:"official_rating,omitempty" jsonschema:"Filter by content rating (such as G, PG, PG-13, R, TV-MA)"`
 	HasSubtitles      *bool    `json:"has_subtitles,omitempty" jsonschema:"Filter items with subtitles (true) or without (false)"`
-	AudioLanguages    string   `json:"audio_languages,omitempty" jsonschema:"Only items with an audio track in one of these languages: comma-separated codes as Jellyfin stores them, such as eng or jpn; und matches tracks with no language. Needs Jellyfin 12 or later. When a code does not occur in the part of the library browsed, the result lists the codes that do"`
-	SubtitleLanguages string   `json:"subtitle_languages,omitempty" jsonschema:"Only items with a subtitle track in one of these languages: comma-separated codes as Jellyfin stores them, such as eng or spa; und matches tracks with no language. Needs Jellyfin 12 or later, and cannot be combined with has_subtitles=false. When a code does not occur in the part of the library browsed, the result lists the codes that do"`
-	MinDateCreated    string   `json:"min_date_created,omitempty" jsonschema:"Only items added on or after this date, listed newest first. A date such as 2024-01-01 starts at midnight in the server's time zone, the one the server instructions state; an RFC 3339 timestamp such as 2024-01-01T18:00:00Z is exact. With this filter, sort_by and sort_order must be omitted or set to DateCreated and Descending"`
-	MaxDateCreated    string   `json:"max_date_created,omitempty" jsonschema:"Only items added on or before this date, listed newest first. A date such as 2024-01-31 includes that whole day in the server's time zone; an RFC 3339 timestamp such as 2024-01-31T18:00:00Z is exact. With this filter, sort_by and sort_order must be omitted or set to DateCreated and Descending"`
+	AudioLanguages    string   `json:"audio_languages,omitempty" jsonschema:"Comma-separated audio track language codes as Jellyfin stores them (such as eng,jpn; und matches untagged). Needs Jellyfin 12+"`
+	SubtitleLanguages string   `json:"subtitle_languages,omitempty" jsonschema:"Comma-separated subtitle language codes as Jellyfin stores them (such as eng,spa; und matches untagged). Needs Jellyfin 12+; cannot be combined with has_subtitles=false"`
+	MinHeight         *int     `json:"min_height,omitempty" jsonschema:"Minimum video height in pixels (prefer min_width for widescreen; useful for 4:3 such as 1000 with is_hd=true for 1440x1080, or 4200 for 4:3 8K)"`
+	MaxHeight         *int     `json:"max_height,omitempty" jsonschema:"Maximum video height in pixels (prefer is_hd=false for SD, because cropped widescreen HD can be under 576 pixels tall)"`
+	MinWidth          *int     `json:"min_width,omitempty" jsonschema:"Minimum video width in pixels (such as 1200 for 720p+, 1800 with is_hd=true for widescreen 1080p, or 7600 for 8K)"`
+	MaxWidth          *int     `json:"max_width,omitempty" jsonschema:"Maximum video width in pixels (such as 1799 with is_hd=true and max_height=999 for 720p, or 7599 with is_4k=true and max_height=4199 for 4K without 8K; for SD prefer is_hd=false)"`
+	IsHD              *bool    `json:"is_hd,omitempty" jsonschema:"false = standard definition (width < 1200; prefer over max_width/max_height for SD or DVD). true = HD (720p, 1080p, 1440p) excluding 4K/8K; combine with is_4k=true for all HD, 4K, and 8K"`
+	Is4K              *bool    `json:"is_4k,omitempty" jsonschema:"true = 4K and 8K (width >= 3800 or height >= 2100). Omit for non-4K: false matches nothing and is refused (use is_hd or max_width=3799, max_height=2099)"`
+	GroupBySeries     *bool    `json:"group_by_series,omitempty" jsonschema:"When true with type=Episode, return distinct matching series (id, name, type, matching_episodes, total_episodes) sorted by name instead of episodes; omit sort and created-date filters. Pass a series id as parent_id without group_by_series to list its matching episodes"`
+	MinDateCreated    string   `json:"min_date_created,omitempty" jsonschema:"Items added on or after YYYY-MM-DD (server time zone) or RFC 3339 timestamp; orders newest first (omit sort_by/sort_order)"`
+	MaxDateCreated    string   `json:"max_date_created,omitempty" jsonschema:"Items added on or before YYYY-MM-DD (whole day, server time zone) or RFC 3339 timestamp; orders newest first (omit sort_by/sort_order)"`
 	MinPremiereDate   string   `json:"min_premiere_date,omitempty" jsonschema:"Items released on or after this date (YYYY-MM-DD, read by Jellyfin in UTC)"`
 	MaxPremiereDate   string   `json:"max_premiere_date,omitempty" jsonschema:"Items released on or before this date (YYYY-MM-DD, read by Jellyfin in UTC)"`
 	Limit             int      `json:"limit,omitempty" jsonschema:"Maximum results per page (default 50)"`
@@ -306,10 +313,10 @@ type VideosInput struct {
 // --- Analytics ---
 
 type AnalyticsInput struct {
-	Action   string `json:"action" jsonschema:"Action: library_stats (counts by type), library_size (total storage by type), size_report (rank individual items or series by total storage size; defaults to Series), codec_report (codec/resolution distribution), never_played (unplayed items), recently_added (items added within N days), duplicate_check (items whose name and year match; it does not compare files), played_status (per-user played/unplayed status for an item; requires item_id)"`
+	Action   string `json:"action" jsonschema:"Action: library_stats (counts by type), library_size (storage by type), size_report (largest items or series; defaults to Series), codec_report (codec, container, HDR, and resolution counts), never_played (unplayed items), recently_added (items added within N days), duplicate_check (matching name and year; defaults to Movie), played_status (per-user play state for item_id)"`
 	ItemID   string `json:"item_id,omitempty" jsonschema:"Item ID for played_status (series, movie, or other item; get it from search or browse)"`
 	ParentID string `json:"parent_id,omitempty" jsonschema:"Library ID to scope results (get from jellyfin_libraries); ignored by played_status"`
-	Type     string `json:"type,omitempty" jsonschema:"Item type filter. Defaults per action: library_stats counts nine types; codec_report and duplicate_check use Movie; never_played uses Movie and Episode; size_report uses Series; library_size uses Movie, Episode, Audio, and MusicVideo. Size and codec actions need file-bearing types (Movie, Episode, Audio, MusicVideo); Series and MusicAlbum have no files of their own"`
+	Type     string `json:"type,omitempty" jsonschema:"Item type filter. Defaults: Movie (codec_report, duplicate_check), Series (size_report), Movie,Episode (never_played). codec_report and library_size need file-bearing types (Movie, Episode, Audio, MusicVideo, or Video; comma-separated ok for codec_report)"`
 	Limit    int    `json:"limit,omitempty" jsonschema:"Maximum results (default 500 for never_played and recently_added, 25 for size_report)"`
 	Days     int    `json:"days,omitempty" jsonschema:"Lookback period in days for recently_added (default 30)"`
 }

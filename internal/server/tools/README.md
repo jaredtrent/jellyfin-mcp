@@ -8,8 +8,8 @@ Thirty-one tools in eight toolsets. `--toolsets discovery,media,...` registers o
 |------|-------------|
 | `jellyfin_libraries` | List all media libraries and their IDs |
 | `jellyfin_search` | Search for media by keyword |
-| `jellyfin_browse` | Browse and filter by genre, year, studio, person, rating, date added, audio and subtitle language (Jellyfin 12), sort order, and any user's play state |
-| `jellyfin_get_item` | Full metadata for a specific item (genres, cast, codecs, ratings, provider IDs, chapters, and on Jellyfin 12 the original language and the collections that include it) |
+| `jellyfin_browse` | Browse and filter by genre, year, studio, series, person, rating, date added, audio and subtitle language, video resolution, sort order, and playback state |
+| `jellyfin_get_item` | Full metadata for an item: genres, cast, codecs, ratings, provider IDs, chapters, original language, and collections |
 | `jellyfin_recommendations` | Personalized suggestions, next up, latest additions, similar items |
 | `jellyfin_item_extras` | Special features, trailers, theme songs, intro/outro markers |
 | `jellyfin_download_link` | Link to download an item: its page in the Jellyfin web app, with the file's path and size |
@@ -71,7 +71,7 @@ Thirty-one tools in eight toolsets. `--toolsets discovery,media,...` registers o
 
 | Tool | Description |
 |------|-------------|
-| `jellyfin_analytics` | Library stats, codec reports, duplicates, unplayed items |
+| `jellyfin_analytics` | Library stats, codec and resolution reports, duplicates, unplayed items |
 
 ## Output shapes
 
@@ -83,5 +83,5 @@ Eight tools declare an output type: `jellyfin_libraries`, `jellyfin_search`, `je
 - A tool with several actions has one output type. Each action's lists are present, as `[]` when empty, and the other actions' fields are absent.
 - An error result carries text and `isError`, and no `structuredContent`.
 
-The other 22 tools return text only, with the same item shape embedded in their JSON where they list items.
+The other 23 tools return text only, with the same item shape embedded in their JSON where they list items.
 

@@ -25,6 +25,9 @@ func MediaItemFrom(m map[string]any) MediaItem {
 	if rt := GetInt64(m, "RunTimeTicks"); rt > 0 {
 		item.RuntimeMinutes = rt / TicksPerMinute
 	}
+	if w, h := GetInt(m, "Width"), GetInt(m, "Height"); w > 0 && h > 0 && GetString(m, "MediaType") != "Photo" && GetString(m, "Type") != "Photo" {
+		item.Resolution = fmt.Sprintf("%dx%d", w, h)
+	}
 	if ud := ToMap(m["UserData"]); ud != nil {
 		item.Played = GetBool(ud, "Played")
 		item.Progress = progressOf(ud)
@@ -233,6 +236,7 @@ func mediaSourceFrom(sm map[string]any) MediaSourceInfo {
 	if sz := GetInt64(sm, "Size"); sz > 0 {
 		source.SizeMB = sz / BytesPerMB
 	}
+	seenVideo := false
 	for _, st := range ToSlice(sm["MediaStreams"]) {
 		stm := ToMap(st)
 		if stm == nil {
@@ -240,6 +244,10 @@ func mediaSourceFrom(sm map[string]any) MediaSourceInfo {
 		}
 		switch GetString(stm, "Type") {
 		case "Video":
+			if seenVideo {
+				continue
+			}
+			seenVideo = true
 			source.VideoCodec = GetString(stm, "Codec")
 			if w := GetInt(stm, "Width"); w > 0 {
 				source.Resolution = fmt.Sprintf("%dx%d", w, GetInt(stm, "Height"))
