@@ -274,3 +274,34 @@ func TestToolTextsLeaveConfirmationToTheGate(t *testing.T) {
 		}
 	}
 }
+
+// Every tool's name, description, and input schema are sent on every session,
+// so no single tool may grow into a multi-kilobyte manual by repeating rules
+// across its description and sibling properties.
+func TestToolInputContextBudget(t *testing.T) {
+	const maxPerToolBytes = 6500
+	cs := newTestSession(t, &mockClient{}, "")
+	res, err := cs.ListTools(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range res.Tools {
+		b, err := json.Marshal(struct {
+			Name        string `json:"name"`
+			Title       string `json:"title,omitempty"`
+			Description string `json:"description,omitempty"`
+			InputSchema any    `json:"inputSchema"`
+		}{
+			Name:        tool.Name,
+			Title:       tool.Title,
+			Description: tool.Description,
+			InputSchema: tool.InputSchema,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(b) > maxPerToolBytes {
+			t.Errorf("%s input definition is %d bytes (max %d); deduplicate cross-field rules or move post-call caveats to runtime Notes", tool.Name, len(b), maxPerToolBytes)
+		}
+	}
+}

@@ -20,6 +20,7 @@ type MediaItem struct {
 	CommunityRating   float64 `json:"community_rating,omitempty" jsonschema:"Community rating out of 10"`
 	OfficialRating    string  `json:"official_rating,omitempty" jsonschema:"Content rating, such as PG-13"`
 	RuntimeMinutes    int64   `json:"runtime_minutes,omitempty" jsonschema:"Runtime in minutes"`
+	Resolution        string  `json:"resolution,omitempty" jsonschema:"Video width x height, such as 1920x1080"`
 	Played            bool    `json:"played,omitempty" jsonschema:"True when the user finished the item at least once, or marked it played by hand"`
 	Progress          string  `json:"progress,omitempty" jsonschema:"The position saved by the user's latest play, as a percentage; set beside played when a finished item is being watched again"`
 	Favorite          bool    `json:"favorite,omitempty" jsonschema:"Whether the user marked the item a favorite"`
@@ -31,6 +32,8 @@ type MediaItem struct {
 	StartTime         string  `json:"start_time,omitempty" jsonschema:"When a Live TV program or recording starts, in the server's time zone"`
 	EndTime           string  `json:"end_time,omitempty" jsonschema:"When a Live TV program or recording ends, in the server's time zone"`
 	ChannelName       string  `json:"channel_name,omitempty" jsonschema:"The channel of a Live TV program or recording"`
+	MatchingEpisodes  int     `json:"matching_episodes,omitempty" jsonschema:"Matching episode count on disk (for group_by_series)"`
+	TotalEpisodes     int     `json:"total_episodes,omitempty" jsonschema:"Total episode count on disk excluding resolution filters (for group_by_series)"`
 }
 
 // ItemListOutput is a page of items from jellyfin_search or jellyfin_browse.
@@ -272,12 +275,12 @@ type TypeSize struct {
 
 type CodecDistribution struct {
 	TotalMediaSources int            `json:"total_media_sources" jsonschema:"How many media files were examined"`
-	VideoCodecs       map[string]int `json:"video_codecs" jsonschema:"Files per video codec"`
+	VideoCodecs       map[string]int `json:"video_codecs" jsonschema:"Video streams per video codec"`
 	AudioCodecs       map[string]int `json:"audio_codecs" jsonschema:"Audio tracks per codec"`
 	Containers        map[string]int `json:"containers" jsonschema:"Files per container"`
-	Resolutions       map[string]int `json:"resolutions" jsonschema:"Files per resolution class"`
-	VideoRanges       map[string]int `json:"video_ranges" jsonschema:"Files per video range or HDR format"`
-	BitDepths         map[string]int `json:"bit_depths" jsonschema:"Files per bit depth"`
+	Resolutions       map[string]int `json:"resolutions" jsonschema:"Video streams per resolution tier (8K (4320p) down to SD (<480p)), classified by width and height"`
+	VideoRanges       map[string]int `json:"video_ranges" jsonschema:"Video streams per video range or HDR format"`
+	BitDepths         map[string]int `json:"bit_depths" jsonschema:"Video streams per bit depth"`
 }
 
 type SizeEntry struct {
@@ -350,5 +353,5 @@ type AnalyticsOutput struct {
 	// played_status
 	ItemSummary *PlayedStatusItem   `json:"item_summary,omitempty" jsonschema:"The item asked about, for action played_status"`
 	Users       *[]PlayedStatusUser `json:"users,omitempty" jsonschema:"Each enabled user's play state for the item, for action played_status"`
-	Notes       []string            `json:"notes,omitempty" jsonschema:"Notes about the result: limits reached and what could not be read"`
+	Notes       []string            `json:"notes,omitempty" jsonschema:"Notes about the result: limits reached, filters that matched nothing, and what could not be read"`
 }

@@ -82,8 +82,8 @@ Append flags after the package name in the `args` array:
 |------|-------------|
 | `jellyfin_libraries` | List all media libraries and their IDs |
 | `jellyfin_search` | Search for media by keyword |
-| `jellyfin_browse` | Browse and filter by genre, year, studio, person, rating, date added, audio and subtitle language (Jellyfin 12), sort order, and any user's play state |
-| `jellyfin_get_item` | Full metadata for a specific item (genres, cast, codecs, ratings, provider IDs, chapters, and on Jellyfin 12 the original language and the collections that include it) |
+| `jellyfin_browse` | Browse and filter by genre, year, studio, series, person, rating, date added, audio and subtitle language, video resolution, sort order, and playback state |
+| `jellyfin_get_item` | Full metadata for an item: genres, cast, codecs, ratings, provider IDs, chapters, original language, and collections |
 | `jellyfin_recommendations` | Personalized suggestions, next up, latest additions, similar items |
 | `jellyfin_item_extras` | Special features, trailers, theme songs, intro/outro markers |
 | `jellyfin_download_link` | Link to download an item: its page in the Jellyfin web app, with the file's path and size |
@@ -159,7 +159,7 @@ Append flags after the package name in the `args` array:
 
 | Tool | Description |
 |------|-------------|
-| `jellyfin_analytics` | Library stats, codec reports, duplicates, unplayed items |
+| `jellyfin_analytics` | Library stats, codec and resolution reports, duplicates, unplayed items |
 </details>
 
 ## Prompts (19)

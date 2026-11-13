@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/url"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -344,4 +346,139 @@ func analyticsItemIDs(out jf.AnalyticsOutput) []string {
 		ids = append(ids, it.ID)
 	}
 	return ids
+}
+
+func TestAnalytics_CodecReport_ResolutionClasses(t *testing.T) {
+	video := func(w, h int) map[string]any {
+		return map[string]any{"Type": "Video", "Codec": "hevc", "Width": w, "Height": h}
+	}
+	items := []map[string]any{
+		// 8K (4320p): 16:9, 4:3, and portrait
+		{"Id": "m1", "MediaSources": []map[string]any{{"Container": "mkv", "MediaStreams": []map[string]any{video(7680, 4320)}}}},
+		{"Id": "m2", "MediaSources": []map[string]any{{"Container": "mkv", "MediaStreams": []map[string]any{video(5760, 4320)}}}},
+		{"Id": "m3", "MediaSources": []map[string]any{{"Container": "mkv", "MediaStreams": []map[string]any{video(4320, 7680)}}}},
+		// 4K (2160p): cropped scope, 4:3 UHD, 21:9 WUHD, and portrait
+		{"Id": "m4", "MediaSources": []map[string]any{{"Container": "mkv", "MediaStreams": []map[string]any{video(3832, 1596)}}}},
+		{"Id": "m5", "MediaSources": []map[string]any{{"Container": "mkv", "MediaStreams": []map[string]any{video(2880, 2160)}}}},
+		{"Id": "m6", "MediaSources": []map[string]any{{"Container": "mkv", "MediaStreams": []map[string]any{video(5120, 2160)}}}},
+		{"Id": "m7", "MediaSources": []map[string]any{{"Container": "mkv", "MediaStreams": []map[string]any{video(2160, 3840)}}}},
+		// 1440p: QHD, 21:9 UWQHD, cropped 2560-wide, and portrait 1440p
+		{"Id": "m8", "MediaSources": []map[string]any{{"Container": "mkv", "MediaStreams": []map[string]any{video(2560, 1440)}}}},
+		{"Id": "m9", "MediaSources": []map[string]any{{"Container": "mkv", "MediaStreams": []map[string]any{video(3440, 1440)}}}},
+		{"Id": "m10", "MediaSources": []map[string]any{{"Container": "mkv", "MediaStreams": []map[string]any{video(2560, 1080)}}}},
+		{"Id": "m11", "MediaSources": []map[string]any{{"Container": "mkv", "MediaStreams": []map[string]any{video(1440, 2560)}}}},
+		// 1080p: cropped scope, dual-axis crop, 4:3 Blu-ray, DCI 2K, portrait, and height-only
+		{"Id": "m12", "MediaSources": []map[string]any{{"Container": "mkv", "MediaStreams": []map[string]any{video(1918, 802)}}}},
+		{"Id": "m13", "MediaSources": []map[string]any{{"Container": "mkv", "MediaStreams": []map[string]any{video(1818, 994)}}}},
+		{"Id": "m14", "MediaSources": []map[string]any{{"Container": "mkv", "MediaStreams": []map[string]any{video(1440, 1080)}}}},
+		{"Id": "m15", "MediaSources": []map[string]any{{"Container": "mkv", "MediaStreams": []map[string]any{video(2048, 1080)}}}},
+		{"Id": "m16", "MediaSources": []map[string]any{{"Container": "mkv", "MediaStreams": []map[string]any{video(1080, 1920)}}}},
+		{"Id": "m17", "MediaSources": []map[string]any{{"Container": "mkv", "MediaStreams": []map[string]any{video(0, 1080)}}}},
+		// 720p: cropped scope, 2:1 Univisium, 4:3 720p, and portrait
+		{"Id": "m18", "MediaSources": []map[string]any{{"Container": "mkv", "MediaStreams": []map[string]any{video(1280, 536)}}}},
+		{"Id": "m19", "MediaSources": []map[string]any{{"Container": "mkv", "MediaStreams": []map[string]any{video(1440, 720)}}}},
+		{"Id": "m20", "MediaSources": []map[string]any{{"Container": "mkv", "MediaStreams": []map[string]any{video(960, 720)}}}},
+		{"Id": "m21", "MediaSources": []map[string]any{{"Container": "mkv", "MediaStreams": []map[string]any{video(720, 1280)}}}},
+		// 576p: PAL DVD, cropped PAL, square-pixel PAL 1024x576, and portrait
+		{"Id": "m22", "MediaSources": []map[string]any{{"Container": "mkv", "MediaStreams": []map[string]any{video(720, 576)}}}},
+		{"Id": "m23", "MediaSources": []map[string]any{{"Container": "mkv", "MediaStreams": []map[string]any{video(688, 568)}}}},
+		{"Id": "m24", "MediaSources": []map[string]any{{"Container": "mkv", "MediaStreams": []map[string]any{video(1024, 576)}}}},
+		{"Id": "m25", "MediaSources": []map[string]any{{"Container": "mkv", "MediaStreams": []map[string]any{video(576, 1024)}}}},
+		// 480p: qHD 960x540, cropped widescreen DVD, 4:3 480p, and portrait
+		{"Id": "m26", "MediaSources": []map[string]any{{"Container": "mp4", "MediaStreams": []map[string]any{video(960, 540)}}}},
+		{"Id": "m27", "MediaSources": []map[string]any{{"Container": "mkv", "MediaStreams": []map[string]any{video(720, 400)}}}},
+		{"Id": "m28", "MediaSources": []map[string]any{{"Container": "mkv", "MediaStreams": []map[string]any{video(640, 480)}}}},
+		{"Id": "m29", "MediaSources": []map[string]any{{"Container": "mkv", "MediaStreams": []map[string]any{video(480, 854)}}}},
+		// SD (<480p): 360p, 352p, and portrait 360p
+		{"Id": "m30", "MediaSources": []map[string]any{{"Container": "mkv", "MediaStreams": []map[string]any{video(640, 360)}}}},
+		{"Id": "m31", "MediaSources": []map[string]any{{"Container": "mkv", "MediaStreams": []map[string]any{video(624, 352)}}}},
+		{"Id": "m32", "MediaSources": []map[string]any{{"Container": "mkv", "MediaStreams": []map[string]any{video(360, 640)}}}},
+		// Unmeasured stream (0x0) is not bucketed; dual-layer file counts every video stream present.
+		{"Id": "m33", "MediaSources": []map[string]any{{"Container": "mkv", "MediaStreams": []map[string]any{video(0, 0)}}}},
+		{"Id": "m34", "MediaSources": []map[string]any{{"Container": "mkv", "MediaStreams": []map[string]any{
+			{"Type": "Video", "Codec": "hevc", "Width": 3840, "Height": 2160, "VideoRange": "HDR", "VideoRangeType": "Unknown"},
+			{"Type": "Video", "Codec": "hevc", "Width": 1920, "Height": 1080, "VideoRange": "Unknown", "VideoRangeType": "Unknown"},
+		}}}},
+	}
+
+	mc := &mockClient{getFunc: func(_ context.Context, _ string, _ url.Values, dest any) error {
+		return jsonInto(map[string]any{"Items": items, "TotalRecordCount": len(items)}, dest)
+	}}
+
+	out := structured[jf.AnalyticsOutput](t, callTool(t, mc, "", "jellyfin_analytics", map[string]any{"action": "codec_report"}))
+	if out.CodecReport == nil {
+		t.Fatal("codec_report is nil")
+	}
+	want := map[string]int{
+		"8K (4320p)": 3,
+		"4K (2160p)": 5,
+		"1440p":      4,
+		"1080p":      7,
+		"720p":       4,
+		"576p":       4,
+		"480p":       4,
+		"SD (<480p)": 3,
+	}
+	if !maps.Equal(out.CodecReport.Resolutions, want) {
+		t.Errorf("resolutions = %v, want %v", out.CodecReport.Resolutions, want)
+	}
+	wantRanges := map[string]int{"HDR": 1, "Unknown": 1}
+	if !maps.Equal(out.CodecReport.VideoRanges, wantRanges) {
+		t.Errorf("video_ranges = %v, want %v", out.CodecReport.VideoRanges, wantRanges)
+	}
+}
+
+func TestAnalytics_CodecReport_RejectsContainerTypesWithoutNetwork(t *testing.T) {
+	calls := 0
+	mc := &mockClient{getFunc: func(_ context.Context, _ string, _ url.Values, _ any) error {
+		calls++
+		return nil
+	}}
+
+	for _, bad := range []string{"Series", "series", "Season", "MusicAlbum", "MusicArtist", "BoxSet", "Playlist", "Folder", "CollectionFolder", "Movie,Series", " , "} {
+		res := callTool(t, mc, "", "jellyfin_analytics", map[string]any{"action": "codec_report", "type": bad})
+		if !res.IsError {
+			t.Errorf("type=%q: expected an error result", bad)
+		}
+		if txt := resultText(t, res); !strings.Contains(txt, "Episode") && !strings.Contains(txt, "file-bearing") {
+			t.Errorf("type=%q: error %q should point to file-bearing types", bad, txt)
+		}
+	}
+	if calls != 0 {
+		t.Errorf("made %d network calls for invalid codec_report types, want 0", calls)
+	}
+
+	var sentType string
+	mcValid := &mockClient{getFunc: func(_ context.Context, _ string, params url.Values, dest any) error {
+		sentType = params.Get("IncludeItemTypes")
+		return jsonInto(map[string]any{"Items": []map[string]any{}, "TotalRecordCount": 0}, dest)
+	}}
+	res := callTool(t, mcValid, "", "jellyfin_analytics", map[string]any{"action": "codec_report", "type": " Movie , Episode , movie "})
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", resultText(t, res))
+	}
+	if sentType != "Movie,Episode" {
+		t.Errorf("IncludeItemTypes = %q, want %q", sentType, "Movie,Episode")
+	}
+}
+
+func TestAnalytics_CodecReport_EmptyMovieDefaultNote(t *testing.T) {
+	mc := &mockClient{getFunc: func(_ context.Context, _ string, _ url.Values, dest any) error {
+		return jsonInto(map[string]any{"Items": []map[string]any{}, "TotalRecordCount": 0}, dest)
+	}}
+
+	scoped := structured[jf.AnalyticsOutput](t, callTool(t, mc, "", "jellyfin_analytics", map[string]any{"action": "codec_report", "parent_id": "tv-lib"}))
+	if !hasNote(scoped.Notes, "No Movie media files were found in this library") || !hasNote(scoped.Notes, "type=Episode") {
+		t.Errorf("scoped empty notes = %v, want TV/music type hint", scoped.Notes)
+	}
+
+	unscoped := structured[jf.AnalyticsOutput](t, callTool(t, mc, "", "jellyfin_analytics", map[string]any{"action": "codec_report"}))
+	if !hasNote(unscoped.Notes, "codec_report defaults to type=Movie") {
+		t.Errorf("unscoped empty notes = %v, want default-Movie hint", unscoped.Notes)
+	}
+
+	explicit := structured[jf.AnalyticsOutput](t, callTool(t, mc, "", "jellyfin_analytics", map[string]any{"action": "codec_report", "type": "Episode", "parent_id": "tv-lib"}))
+	if len(explicit.Notes) != 0 {
+		t.Errorf("explicit type=Episode empty notes = %v, want none", explicit.Notes)
+	}
 }

@@ -22,11 +22,9 @@ func RegisterMediaTools(server *mcp.Server, client jf.Client, enabled func(strin
 			InputSchema: jf.WithEnums[jf.TVShowsInput](map[string][]any{
 				"action": {"seasons", "episodes", "next_up"},
 			}),
-			Description: "Navigate TV show structure: list seasons of a series, list episodes in a season, or get the next unplayed episode. " +
-				"Use action 'seasons' with a series_id to see all seasons and episode counts. " +
-				"Use action 'episodes' with a series_id and season_number to list all episodes in that season. " +
-				"Use action 'next_up' to get the next episode to watch (optionally scoped to a specific series with series_id). " +
-				"Get series IDs from jellyfin_search with type 'Series'.",
+			Description: "Navigate TV show structure: list 'seasons' (with episode counts), 'episodes' in one season, or the 'next_up' unplayed episode. " +
+				"Get series_id from jellyfin_search (type='Series') or jellyfin_browse. " +
+				"To filter episodes across a series or library instead of paging season by season, use jellyfin_browse with type='Episode' (and parent_id or group_by_series=true).",
 			Annotations: AnnotReadOnly,
 		}, func(ctx context.Context, req *mcp.CallToolRequest, args jf.TVShowsInput) (*mcp.CallToolResult, *jf.TVShowsOutput, error) {
 			userID, err := client.GetUserID(ctx)

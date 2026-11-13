@@ -259,6 +259,54 @@ func TestMediaItemFrom(t *testing.T) {
 				"type": "Movie",
 			},
 		},
+		{
+			name: "video resolution formatted as width x height",
+			input: map[string]any{
+				"Id":        "vid1",
+				"Name":      "Cropped Scope",
+				"Type":      "Movie",
+				"MediaType": "Video",
+				"Width":     float64(1920),
+				"Height":    float64(800),
+			},
+			expect: map[string]any{
+				"id":         "vid1",
+				"name":       "Cropped Scope",
+				"type":       "Movie",
+				"resolution": "1920x800",
+			},
+		},
+		{
+			name: "zero or partial dimensions omit resolution",
+			input: map[string]any{
+				"Id":     "vid0",
+				"Name":   "Unmeasured Video",
+				"Type":   "Movie",
+				"Width":  float64(1920),
+				"Height": float64(0),
+			},
+			expect: map[string]any{
+				"id":   "vid0",
+				"name": "Unmeasured Video",
+				"type": "Movie",
+			},
+		},
+		{
+			name: "photo dimensions do not set video resolution",
+			input: map[string]any{
+				"Id":        "ph1",
+				"Name":      "Holiday Photo",
+				"Type":      "Photo",
+				"MediaType": "Photo",
+				"Width":     float64(4032),
+				"Height":    float64(3024),
+			},
+			expect: map[string]any{
+				"id":   "ph1",
+				"name": "Holiday Photo",
+				"type": "Photo",
+			},
+		},
 	}
 
 	for _, tc := range tests {
@@ -1594,6 +1642,22 @@ func TestDetailedItemFrom_DateAddedAndVideoRangeType(t *testing.T) {
 	}
 	if got := DetailedItemFrom(source("Unknown")).MediaSources[0].VideoRangeType; got != "" {
 		t.Errorf("video_range_type = %q for Unknown, want none", got)
+	}
+
+	// A dual-layer file keeps the primary (first) video stream rather than
+	// letting a 1080p enhancement layer overwrite the 4K base layer.
+	dual := DetailedItemFrom(map[string]any{
+		"Id": "dv-7", "Name": "Dual Layer", "Type": "Movie",
+		"MediaSources": []any{map[string]any{
+			"Container": "mkv",
+			"MediaStreams": []any{
+				map[string]any{"Type": "Video", "Codec": "hevc", "Width": float64(3840), "Height": float64(2160), "Profile": "Main 10", "BitDepth": float64(10), "VideoRange": "HDR", "VideoRangeType": "DOVIWithEL"},
+				map[string]any{"Type": "Video", "Codec": "hevc", "Width": float64(1920), "Height": float64(1080), "Profile": "Main 10", "BitDepth": float64(10), "VideoRange": "SDR", "VideoRangeType": "Unknown"},
+			},
+		}},
+	})
+	if ms := dual.MediaSources[0]; ms.Resolution != "3840x2160" || ms.VideoRange != "HDR" || ms.VideoRangeType != "DOVIWithEL" {
+		t.Errorf("dual-layer media source = %+v, want 3840x2160 HDR DOVIWithEL", ms)
 	}
 }
 
