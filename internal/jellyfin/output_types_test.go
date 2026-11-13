@@ -96,6 +96,13 @@ func TestOutputs_AlwaysPresentFields(t *testing.T) {
 			name:    "play state that is not paused",
 			value:   PlayStateInfo{},
 			present: []string{`"is_paused":false`},
+			absent:  []string{`"play_method"`},
+		},
+		{
+			name:    "transcoding info that re-encodes both streams",
+			value:   TranscodingInfo{},
+			present: []string{`"is_video_direct":false`, `"is_audio_direct":false`},
+			absent:  []string{`"video_codec"`, `"audio_codec"`, `"container"`, `"bitrate_kbps"`, `"transcode_reasons"`},
 		},
 	}
 	for _, tc := range tests {

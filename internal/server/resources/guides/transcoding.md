@@ -26,7 +26,7 @@ Each generation adds codecs, and every later generation keeps them, so a newer c
 - Gen 12 Tiger Lake (11th gen Core) and newer: AV1 decode.
 - Arc A-series, Meteor Lake (Core Ultra), and newer: AV1 encode.
 
-To see whether a stream transcodes at all, and why, open the active sessions on the dashboard, which name the reason, or ask `jellyfin_item_extras action=playback_info` about the item.
+To see whether a stream plays directly, remuxes, or transcodes, and why, check `jellyfin_sessions action=list` while it plays, open the active sessions on the dashboard, or ask `jellyfin_item_extras action=playback_info` about the item.
 
 Arc A-series GPUs need Linux kernel 6.2 or newer. Arc B-series GPUs need kernel 6.12 or newer and Resizable BAR turned on in the firmware. On Linux, add the `jellyfin` user to the `render` group. QSV VPP tone mapping, which uses less power than the OpenCL path, is available only on Linux.
 

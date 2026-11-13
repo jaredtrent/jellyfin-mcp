@@ -73,7 +73,7 @@ type NowPlayingInfo struct {
 }
 
 type PlayStateInfo struct {
-	PlayMethod      string `json:"play_method,omitempty" jsonschema:"Playback method reported by Jellyfin"`
+	PlayMethod      string `json:"play_method,omitempty" jsonschema:"DirectPlay, DirectStream, or Transcode; Jellyfin also reports Transcode when remuxing, so check transcoding_info"`
 	IsPaused        bool   `json:"is_paused" jsonschema:"Whether playback is paused"`
 	PositionSeconds int64  `json:"position_seconds,omitempty" jsonschema:"Playback position in seconds"`
 	PositionTicks   int64  `json:"position_ticks,omitempty" jsonschema:"Playback position in ticks, the value jellyfin_playback_control Seek takes"`
@@ -81,13 +81,13 @@ type PlayStateInfo struct {
 }
 
 type TranscodingInfo struct {
-	VideoCodec       string   `json:"video_codec,omitempty" jsonschema:"Reported output video codec"`
-	AudioCodec       string   `json:"audio_codec,omitempty" jsonschema:"Reported output audio codec"`
-	Container        string   `json:"container,omitempty" jsonschema:"Reported output container"`
-	Bitrate          *int     `json:"bitrate,omitempty" jsonschema:"Reported output bitrate"`
-	IsVideoDirect    *bool    `json:"is_video_direct,omitempty" jsonschema:"Whether video is copied"`
-	IsAudioDirect    *bool    `json:"is_audio_direct,omitempty" jsonschema:"Whether audio is copied"`
-	TranscodeReasons []string `json:"transcode_reasons,omitempty" jsonschema:"Reported transcode reasons"`
+	VideoCodec       string   `json:"video_codec,omitempty" jsonschema:"Output video codec"`
+	AudioCodec       string   `json:"audio_codec,omitempty" jsonschema:"Output audio codec"`
+	Container        string   `json:"container,omitempty" jsonschema:"Output container"`
+	BitrateKbps      int64    `json:"bitrate_kbps,omitempty" jsonschema:"Output bitrate in kbps"`
+	IsVideoDirect    bool     `json:"is_video_direct" jsonschema:"Whether the video stream is copied without re-encoding"`
+	IsAudioDirect    bool     `json:"is_audio_direct" jsonschema:"Whether the audio stream is copied without re-encoding"`
+	TranscodeReasons []string `json:"transcode_reasons,omitempty" jsonschema:"Why the stream is remuxed or transcoded, such as VideoCodecNotSupported or ContainerBitrateExceedsLimit"`
 }
 
 type SessionInfo struct {
@@ -100,7 +100,7 @@ type SessionInfo struct {
 	Status               string           `json:"status" jsonschema:"playing when the session is playing an item, otherwise connected"`
 	NowPlaying           *NowPlayingInfo  `json:"now_playing,omitempty" jsonschema:"The item being played"`
 	PlayState            *PlayStateInfo   `json:"play_state,omitempty" jsonschema:"Playback state of the item being played"`
-	TranscodingInfo      *TranscodingInfo `json:"transcoding_info,omitempty" jsonschema:"Reported transcoding details"`
+	TranscodingInfo      *TranscodingInfo `json:"transcoding_info,omitempty" jsonschema:"Output stream and transcode reasons when FFmpeg remuxes or transcodes; absent for direct play"`
 }
 
 // SessionsOutput serves both jellyfin_sessions actions: list fills Sessions
