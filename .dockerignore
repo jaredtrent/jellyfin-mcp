@@ -5,14 +5,19 @@
 .gitignore
 
 # Build / release artifacts
+/jellyfin-mcp
 dist/
 build/
-*.tar.gz
-*.zip
-*.exe
+**/*.tar.gz
+**/*.tgz
+**/*.zip
+**/*.exe
+**/*.test
+**/*.out
 
 # npm packaging (not used by the Docker build)
 npm/
+**/node_modules/
 
 # CI, docs, and meta
 .github/
@@ -23,13 +28,19 @@ RELEASING.md
 docker-compose.yml
 
 # Secrets / local env
-.env
-.env.*
+**/.env
+**/.env.*
+**/.envrc
+**/.npmrc
+**/*.pem
+**/*.key
 
 # Editor / OS / tooling
-.claude/
-CLAUDE.md
 .vscode/
 .idea/
-.DS_Store
-*.log
+**/*.swp
+**/*.swo
+**/*~
+**/.DS_Store
+**/Thumbs.db
+**/*.log

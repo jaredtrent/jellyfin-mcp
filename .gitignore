@@ -9,33 +9,40 @@ dist/
 *.dylib
 *.test
 *.out
+*.tar.gz
+*.zip
 
 # Go workspace
 go.work
 go.work.sum
 
-# npm package — compiled binary (built by `make build`)
+# npm package — compiled binary (built by `make build`) & registry auth
 npm/jellyfin-mcp/bin/
-npm/.npmrc
+.npmrc
+!.npmrc.template
+node_modules/
+*.tgz
+package.json.tmp
 
 # Environment & secrets
 .env
 .env.*
 !.env.example
+.envrc
+*.pem
+*.key
 
 # OS
 .DS_Store
 Thumbs.db
 
-# IDE
+# IDE & logs
 .vscode/
 .idea/
 *.swp
+*.swo
 *~
-
-# Claude Code
-.claude/
-CLAUDE.md
+*.log
 
 # Internal release docs
 RELEASING.md
