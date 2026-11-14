@@ -35,29 +35,41 @@ func TestBuildToolFilter_AllToolsets(t *testing.T) {
 }
 
 func TestBuildToolFilter_SpecificToolset(t *testing.T) {
-	enabled := tools.BuildToolFilter("discovery", false)
+	enabled := tools.BuildToolFilter("find-media", false)
 	if !enabled("jellyfin_search", tools.AnnotReadOnly) {
-		t.Error("expected jellyfin_search to be enabled in discovery toolset")
+		t.Error("expected jellyfin_search to be enabled in find-media toolset")
 	}
 	if !enabled("jellyfin_libraries", tools.AnnotReadOnly) {
-		t.Error("expected jellyfin_libraries to be enabled in discovery toolset")
+		t.Error("expected jellyfin_libraries to be enabled in find-media toolset")
+	}
+	if !enabled("jellyfin_tv_shows", tools.AnnotReadOnly) {
+		t.Error("expected jellyfin_tv_shows to be enabled in find-media toolset")
+	}
+	if !enabled("jellyfin_user_data", tools.AnnotReadOnly) {
+		t.Error("expected RO projection of jellyfin_user_data to be enabled in find-media toolset")
+	}
+	if enabled("jellyfin_user_data", tools.AnnotWriteOp) {
+		t.Error("expected write variant of jellyfin_user_data to be disabled in find-media toolset")
 	}
 	// A tool from a different toolset should be disabled
-	if enabled("jellyfin_tv_shows", tools.AnnotReadOnly) {
-		t.Error("expected jellyfin_tv_shows to be disabled when only discovery is enabled")
+	if enabled("jellyfin_playback_stats", tools.AnnotReadOnly) {
+		t.Error("expected jellyfin_playback_stats to be disabled when only find-media is enabled")
 	}
 }
 
 func TestBuildToolFilter_MultipleToolsets(t *testing.T) {
-	enabled := tools.BuildToolFilter("discovery,media", false)
+	enabled := tools.BuildToolFilter("discovery,monitor-media", false)
 	if !enabled("jellyfin_search", tools.AnnotReadOnly) {
-		t.Error("expected jellyfin_search enabled")
+		t.Error("expected jellyfin_search enabled via discovery alias")
 	}
-	if !enabled("jellyfin_tv_shows", tools.AnnotReadOnly) {
-		t.Error("expected jellyfin_tv_shows enabled")
+	if !enabled("jellyfin_playback_stats", tools.AnnotReadOnly) {
+		t.Error("expected jellyfin_playback_stats enabled via monitor-media")
 	}
 	if enabled("jellyfin_user_data", tools.AnnotWriteOp) {
-		t.Error("expected jellyfin_user_data disabled")
+		t.Error("expected write variant of jellyfin_user_data disabled")
+	}
+	if enabled("jellyfin_server", tools.AnnotDestructive) {
+		t.Error("expected jellyfin_server disabled")
 	}
 }
 
@@ -66,11 +78,14 @@ func TestBuildToolFilter_ReadOnly(t *testing.T) {
 	if !enabled("jellyfin_search", tools.AnnotReadOnly) {
 		t.Error("expected read-only tool to be enabled in read-only mode")
 	}
-	if enabled("jellyfin_metadata", tools.AnnotWriteOp) {
-		t.Error("expected write tool to be disabled in read-only mode")
+	if enabled("jellyfin_metadata", tools.AnnotDestructiveOpenWorld) {
+		t.Error("expected write-annotated tool to be disabled by raw filter unless registered with read-only annotations")
 	}
-	if enabled("jellyfin_system_control", tools.AnnotDestructive) {
-		t.Error("expected destructive tool to be disabled in read-only mode")
+	if !enabled("jellyfin_metadata", tools.AnnotReadOnlyOpenWorld) {
+		t.Error("expected read-only variant of mixed tool to be enabled in read-only mode")
+	}
+	if enabled("jellyfin_playback", tools.AnnotWriteOp) {
+		t.Error("expected pure write tool to be disabled in read-only mode")
 	}
 }
 
@@ -113,10 +128,16 @@ func TestRegisterTools_AllRegistered(t *testing.T) {
 		t.Fatal("ListTools:", err)
 	}
 
-	// Count expected tools from ToolsetMap
-	var expectedCount int
+	// Count unique expected tools across ToolsetMap (25 total)
+	uniqueTools := make(map[string]bool)
 	for _, toolNames := range tools.ToolsetMap {
-		expectedCount += len(toolNames)
+		for _, name := range toolNames {
+			uniqueTools[name] = true
+		}
+	}
+	expectedCount := len(uniqueTools)
+	if expectedCount != 25 {
+		t.Errorf("ToolsetMap has %d unique tools, want 25", expectedCount)
 	}
 
 	if len(result.Tools) != expectedCount {
@@ -279,7 +300,7 @@ func TestToolTextsLeaveConfirmationToTheGate(t *testing.T) {
 // so no single tool may grow into a multi-kilobyte manual by repeating rules
 // across its description and sibling properties.
 func TestToolInputContextBudget(t *testing.T) {
-	const maxPerToolBytes = 6500
+	const maxPerToolBytes = 3500
 	cs := newTestSession(t, &mockClient{}, "")
 	res, err := cs.ListTools(t.Context(), nil)
 	if err != nil {
@@ -302,6 +323,50 @@ func TestToolInputContextBudget(t *testing.T) {
 		}
 		if len(b) > maxPerToolBytes {
 			t.Errorf("%s input definition is %d bytes (max %d); deduplicate cross-field rules or move post-call caveats to runtime Notes", tool.Name, len(b), maxPerToolBytes)
+		}
+	}
+}
+
+// Every write tool explicitly sets DestructiveHint and OpenWorldHint, and
+// tools containing DestructiveGate actions declare DestructiveHint=true.
+func TestToolAnnotationsExplicitAndConsistent(t *testing.T) {
+	cs := newTestSession(t, &mockClient{}, "")
+	res, err := cs.ListTools(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDestructive := map[string]bool{
+		"jellyfin_playlists":        true,
+		"jellyfin_collections":      true,
+		"jellyfin_users":            true,
+		"jellyfin_library_manage":   true,
+		"jellyfin_plugins":          true,
+		"jellyfin_server":           true,
+		"jellyfin_devices":          true,
+		"jellyfin_live_tv":          true,
+		"jellyfin_metadata":         true,
+		"jellyfin_subtitles_lyrics": true,
+	}
+	wantOpenWorld := map[string]bool{
+		"jellyfin_plugins":          true,
+		"jellyfin_metadata":         true,
+		"jellyfin_subtitles_lyrics": true,
+		"jellyfin_images":           true,
+	}
+	for _, tool := range res.Tools {
+		ann := tool.Annotations
+		if ann == nil {
+			t.Fatalf("%s has nil Annotations", tool.Name)
+		}
+		if ann.OpenWorldHint == nil {
+			t.Errorf("%s leaves OpenWorldHint unset", tool.Name)
+		} else if *ann.OpenWorldHint != wantOpenWorld[tool.Name] {
+			t.Errorf("%s OpenWorldHint = %v, want %v", tool.Name, *ann.OpenWorldHint, wantOpenWorld[tool.Name])
+		}
+		if ann.DestructiveHint == nil {
+			t.Errorf("%s has nil DestructiveHint (MCP defaults nil to true)", tool.Name)
+		} else if *ann.DestructiveHint != wantDestructive[tool.Name] {
+			t.Errorf("%s DestructiveHint = %v, want %v", tool.Name, *ann.DestructiveHint, wantDestructive[tool.Name])
 		}
 	}
 }

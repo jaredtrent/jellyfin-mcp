@@ -203,9 +203,17 @@ func toMaps(raw []any) []map[string]any {
 // AudioPlaybackStopped entry, looking back at most ActivityLogLookback
 // entries. Marking an item played by hand writes no such entry.
 func PlayedItemIDs(ctx context.Context, client Client, userID string) (map[string]bool, error) {
+	played, _, err := PlayedItemIDsWithCap(ctx, client, userID)
+	return played, err
+}
+
+// PlayedItemIDsWithCap is PlayedItemIDs plus a boolean reporting whether the
+// activity-log scan stopped at ActivityLogLookback before examining all older
+// entries.
+func PlayedItemIDsWithCap(ctx context.Context, client Client, userID string) (map[string]bool, bool, error) {
 	result, err := QueryActivity(ctx, client, ActivityQuery{Type: "PlaybackStopped", UserID: userID, Limit: ActivityLogLookback})
 	if err != nil {
-		return nil, fmt.Errorf("reading playback from the activity log: %w", err)
+		return nil, false, fmt.Errorf("reading playback from the activity log: %w", err)
 	}
 	played := make(map[string]bool, len(result.Entries))
 	for _, m := range result.Entries {
@@ -213,5 +221,5 @@ func PlayedItemIDs(ctx context.Context, client Client, userID string) (map[strin
 			played[NormalizeID(id)] = true
 		}
 	}
-	return played, nil
+	return played, result.Capped, nil
 }

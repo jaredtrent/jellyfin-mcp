@@ -75,9 +75,21 @@ func TestUsers_UpdatePassword_UsesQueryUserID(t *testing.T) {
 func TestUsers_UpdateConfig_RawConfigAsksConfirmation(t *testing.T) {
 	var calls []postCall
 	mc := recordingUsersClient(t, &calls)
+	mc.getFunc = func(_ context.Context, _ string, _ url.Values, dest any) error {
+		return jsonInto(map[string]any{
+			"Name": "User A",
+			"Configuration": map[string]any{
+				"AudioLanguagePreference": "fra",
+				"PlayDefaultAudioTrack":   true,
+			},
+		}, dest)
+	}
 	result := callTool(t, mc, "", "jellyfin_users", map[string]any{"action": "update_config", "user_id": "user-1", "config": map[string]any{"AudioLanguagePreference": "eng"}})
-	if text := resultText(t, result); !strings.Contains(text, "CONFIRMATION REQUIRED") || !strings.Contains(text, "Replace the entire configuration") {
-		t.Errorf("got %s", text)
+	text := resultText(t, result)
+	for _, want := range []string{"CONFIRMATION REQUIRED", "Update configuration for user 'User A'?", "AudioLanguagePreference: \"fra\" -> \"eng\"", "Other user preferences stay unchanged."} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing %q in %s", want, text)
+		}
 	}
 	if len(calls) != 0 {
 		t.Errorf("POST sent without confirmation: %v", calls)
@@ -87,8 +99,8 @@ func TestUsers_UpdateConfig_RawConfigAsksConfirmation(t *testing.T) {
 func TestUsers_UpdateConfig_RawConfigUsesQueryUserID(t *testing.T) {
 	var calls []postCall
 	mc := recordingUsersClient(t, &calls)
-	// The user is read only for its name in the confirmation, never to build
-	// the body: the raw config is sent as given.
+	// Raw config patches are merged onto the user's current Configuration so
+	// unspecified preferences are preserved.
 	mc.getFunc = func(_ context.Context, endpoint string, _ url.Values, dest any) error {
 		if !strings.HasPrefix(endpoint, "/Users/") {
 			t.Errorf("unexpected GET %s", endpoint)
@@ -111,8 +123,8 @@ func TestUsers_UpdateConfig_RawConfigUsesQueryUserID(t *testing.T) {
 	}
 	c := assertSinglePost(t, calls, "/Users/Configuration", testAdminTargetUserID)
 	body, ok := c.body.(map[string]any)
-	if !ok || body["SubtitleLanguagePreference"] != "eng" {
-		t.Errorf("body = %#v, want the raw config passed through", c.body)
+	if !ok || body["SubtitleLanguagePreference"] != "eng" || body["AudioLanguagePreference"] != "fra" {
+		t.Errorf("body = %#v, want merged configuration preserving AudioLanguagePreference", c.body)
 	}
 }
 
@@ -177,5 +189,135 @@ func TestUsers_UpdatePolicy_KeepsPathUserID(t *testing.T) {
 	}
 	if len(calls[0].params) != 0 {
 		t.Errorf("expected no query parameters, got %v", calls[0].params)
+	}
+}
+
+func TestUsers_UpdatePassword_WarnsDevicesMustSignInAgain(t *testing.T) {
+	var calls []postCall
+	mc := recordingUsersClient(t, &calls)
+	mc.getFunc = func(_ context.Context, _ string, _ url.Values, dest any) error {
+		return jsonInto(map[string]any{"Name": "User A"}, dest)
+	}
+
+	res := callTool(t, mc, "", "jellyfin_users", map[string]any{
+		"action":   "update_password",
+		"user_id":  testAdminTargetUserID,
+		"password": "new-password",
+	})
+	text := resultText(t, res)
+	for _, want := range []string{"CONFIRMATION REQUIRED", "Change the password for user 'User A'?", "signed-in devices must sign in again"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing %q in %s", want, text)
+		}
+	}
+	if len(calls) != 0 {
+		t.Errorf("expected no POST before confirmation, got %d", len(calls))
+	}
+}
+
+func TestUsers_UpdatePolicy_FolderRestrictionSetsEnableAllFoldersFalseAndResolvesNames(t *testing.T) {
+	var calls []postCall
+	mc := recordingUsersClient(t, &calls)
+	mc.getFunc = func(_ context.Context, endpoint string, _ url.Values, dest any) error {
+		switch endpoint {
+		case "/Library/VirtualFolders":
+			return jsonInto([]map[string]any{
+				{"Name": "Movies", "ItemId": "folder-movies"},
+				{"Name": "TV Shows", "ItemId": "folder-tv"},
+			}, dest)
+		default:
+			return jsonInto(map[string]any{
+				"Name":   "User B",
+				"Policy": map[string]any{"EnableAllFolders": true},
+			}, dest)
+		}
+	}
+
+	contradictory := callTool(t, mc, "", "jellyfin_users", map[string]any{
+		"action":             "update_policy",
+		"user_id":            testAdminTargetUserID,
+		"enable_all_folders": true,
+		"enabled_folder_ids": []any{"folder-movies"},
+	})
+	if !contradictory.IsError || !strings.Contains(resultText(t, contradictory), "enable_all_folders=true cannot be combined with enabled_folder_ids") {
+		t.Errorf("expected contradictory policy error, got: %s", resultText(t, contradictory))
+	}
+
+	promptRes := callTool(t, mc, "", "jellyfin_users", map[string]any{
+		"action":             "update_policy",
+		"user_id":            testAdminTargetUserID,
+		"is_admin":           false,
+		"enabled_folder_ids": []any{"folder-movies"},
+	})
+	promptText := resultText(t, promptRes)
+	for _, want := range []string{"CONFIRMATION REQUIRED", "Update permissions for user 'User B'?", "remove administrator access", "restrict library access to 'Movies'"} {
+		if !strings.Contains(promptText, want) {
+			t.Errorf("missing %q in %s", want, promptText)
+		}
+	}
+
+	applyRes := callTool(t, mc, "", "jellyfin_users", map[string]any{
+		"action":             "update_policy",
+		"user_id":            testAdminTargetUserID,
+		"enabled_folder_ids": []any{"folder-movies"},
+		"confirm":            true,
+	})
+	if applyRes.IsError {
+		t.Fatalf("unexpected error: %s", resultText(t, applyRes))
+	}
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 POST, got %d", len(calls))
+	}
+	policy, ok := calls[0].body.(map[string]any)
+	if !ok {
+		t.Fatalf("body = %#v, want policy map", calls[0].body)
+	}
+	if policy["EnableAllFolders"] != false {
+		t.Errorf("EnableAllFolders = %v, want false when enabled_folder_ids is provided", policy["EnableAllFolders"])
+	}
+}
+
+func TestUsers_QuickConnectAuthorize_NamesTargetUserAndPassesUserID(t *testing.T) {
+	var calls []postCall
+	mc := recordingUsersClient(t, &calls)
+	mc.getFunc = func(_ context.Context, endpoint string, _ url.Values, dest any) error {
+		if endpoint == "/Users/"+testAdminTargetUserID {
+			return jsonInto(map[string]any{"Name": "Kids Profile"}, dest)
+		}
+		return jsonInto(map[string]any{"Name": "Default Admin"}, dest)
+	}
+
+	emptyCode := callTool(t, mc, "", "jellyfin_users", map[string]any{"action": "qc_authorize"})
+	if !emptyCode.IsError || !strings.Contains(resultText(t, emptyCode), "displayed on the device") {
+		t.Errorf("expected device-code prompt error, got: %s", resultText(t, emptyCode))
+	}
+
+	unconfirmed := callTool(t, mc, "", "jellyfin_users", map[string]any{
+		"action":  "qc_authorize",
+		"code":    "482910",
+		"user_id": testAdminTargetUserID,
+	})
+	text := resultText(t, unconfirmed)
+	for _, want := range []string{"CONFIRMATION REQUIRED", "Authorize Quick Connect code '482910' for user 'Kids Profile'?"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing %q in %s", want, text)
+		}
+	}
+	if len(calls) != 0 {
+		t.Fatalf("POST sent before confirmation: %v", calls)
+	}
+
+	confirmed := callTool(t, mc, "", "jellyfin_users", map[string]any{
+		"action":  "qc_authorize",
+		"code":    "482910",
+		"user_id": testAdminTargetUserID,
+		"confirm": true,
+	})
+	if confirmed.IsError {
+		t.Fatalf("unexpected error: %s", resultText(t, confirmed))
+	}
+	c := assertSinglePost(t, calls, "/QuickConnect/Authorize", testAdminTargetUserID)
+	if got := c.params.Get("code"); got != "482910" {
+		t.Errorf("code = %q, want 482910", got)
 	}
 }

@@ -9,6 +9,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	jf "github.com/jaredtrent/jellyfin-mcp/internal/jellyfin"
 )
 
 // libraryManagePosts records every PostNoContent request and fails the test
@@ -156,23 +158,48 @@ func TestLibraryManage_AddFolder_RejectsBlankName(t *testing.T) {
 }
 
 // refresh_item asks Jellyfin to run its metadata and image providers; without
-// a refresh mode the server would only rescan the file.
+// a refresh mode the server would only rescan the file. Overwriting existing
+// metadata or images asks for confirmation first.
 func TestLibraryManage_RefreshItemSendsRefreshModes(t *testing.T) {
 	var got url.Values
-	mc := &mockClient{postNoContentFunc: func(_ context.Context, endpoint string, params url.Values, _ any) error {
-		if endpoint != "/Items/item-1/Refresh" {
-			t.Errorf("POST %s", endpoint)
-		}
-		got = params
-		return nil
-	}}
+	posts := 0
+	mc := &mockClient{
+		getFunc: func(_ context.Context, endpoint string, _ url.Values, dest any) error {
+			if endpoint == "/Items/item-1" {
+				return jsonInto(map[string]any{"Name": "TV Shows", "Type": "CollectionFolder", "IsFolder": true}, dest)
+			}
+			return nil
+		},
+		postNoContentFunc: func(_ context.Context, endpoint string, params url.Values, _ any) error {
+			if endpoint != "/Items/item-1/Refresh" {
+				t.Errorf("POST %s", endpoint)
+			}
+			posts++
+			got = params
+			return nil
+		},
+	}
 	callTool(t, mc, "", "jellyfin_library_manage", map[string]any{"action": "refresh_item", "item_id": "item-1"})
 	for key, want := range map[string]string{"MetadataRefreshMode": "FullRefresh", "ImageRefreshMode": "FullRefresh", "ReplaceAllMetadata": "", "ReplaceAllImages": ""} {
 		if got.Get(key) != want {
 			t.Errorf("%s = %q, want %q", key, got.Get(key), want)
 		}
 	}
-	callTool(t, mc, "", "jellyfin_library_manage", map[string]any{"action": "refresh_item", "item_id": "item-1", "replace_all_metadata": true})
+
+	unconfirmed := callTool(t, mc, "", "jellyfin_library_manage", map[string]any{"action": "refresh_item", "item_id": "item-1", "replace_all_metadata": true})
+	if text := resultText(t, unconfirmed); !strings.Contains(text, "CONFIRMATION REQUIRED") || !strings.Contains(text, "library 'TV Shows' and every item in it") || !strings.Contains(text, "including custom edits") {
+		t.Errorf("expected scope and custom-edits warning, got: %s", text)
+	}
+	if posts != 1 {
+		t.Fatalf("posts = %d, want no POST before confirmation", posts)
+	}
+
+	imgUnconfirmed := callTool(t, mc, "", "jellyfin_library_manage", map[string]any{"action": "refresh_item", "item_id": "item-1", "replace_all_images": true})
+	if text := resultText(t, imgUnconfirmed); !strings.Contains(text, "CONFIRMATION REQUIRED") || !strings.Contains(text, "all existing images") {
+		t.Errorf("expected image-overwrite warning, got: %s", text)
+	}
+
+	callTool(t, mc, "", "jellyfin_library_manage", map[string]any{"action": "refresh_item", "item_id": "item-1", "replace_all_metadata": true, "confirm": true})
 	if got.Get("ReplaceAllMetadata") != "true" || got.Get("MetadataRefreshMode") != "FullRefresh" {
 		t.Errorf("replace: %v", got)
 	}
@@ -193,12 +220,13 @@ func TestLibraryManage_ScanAllLibraries(t *testing.T) {
 // result says where Jellyfin lists a library's scan state, because it isn't a
 // scheduled task.
 func TestLibraryManage_ScanItemSendsDefaultModes(t *testing.T) {
+	const itemGUID = "0123456789abcdef0123456789abcdef"
 	var posts []postCall
-	result := callTool(t, libraryManagePosts(t, &posts), "", "jellyfin_library_manage", map[string]any{"action": "scan", "item_id": "lib-1"})
+	result := callTool(t, libraryManagePosts(t, &posts), "", "jellyfin_library_manage", map[string]any{"action": "scan", "item_id": itemGUID})
 	if len(posts) != 1 {
 		t.Fatalf("%d requests, want 1", len(posts))
 	}
-	if posts[0].endpoint != "/Items/lib-1/Refresh" {
+	if posts[0].endpoint != "/Items/"+itemGUID+"/Refresh" {
 		t.Errorf("POST %s", posts[0].endpoint)
 	}
 	want := url.Values{"MetadataRefreshMode": {"Default"}, "ImageRefreshMode": {"Default"}}
@@ -406,10 +434,133 @@ func TestLibraryManage_UpdateOptionsAsksConfirmation(t *testing.T) {
 		postNoContentFunc: func(context.Context, string, url.Values, any) error { writes++; return nil },
 	}
 	result := callTool(t, mc, "", "jellyfin_library_manage", map[string]any{"action": "update_options", "folder_name": "Library A", "library_options": map[string]any{"EnableRealtimeMonitor": true}})
-	if text := resultText(t, result); !strings.Contains(text, "CONFIRMATION REQUIRED") || !strings.Contains(text, "Replace all options") {
-		t.Errorf("got %s", text)
+	text := resultText(t, result)
+	for _, want := range []string{"CONFIRMATION REQUIRED", "Update options for library 'Library A'?", "EnableRealtimeMonitor: true"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing %q in %s", want, text)
+		}
 	}
 	if writes != 0 {
 		t.Errorf("%d writes without confirmation", writes)
+	}
+}
+
+func TestLibraryManage_UpdateOptionsMergesAndDiffs(t *testing.T) {
+	var posts []postCall
+	mc := &mockClient{
+		getFunc: func(_ context.Context, endpoint string, _ url.Values, dest any) error {
+			if endpoint != "/Library/VirtualFolders" {
+				t.Errorf("unexpected GET %s", endpoint)
+			}
+			return jsonInto([]map[string]any{{
+				"Name":   "TV Shows",
+				"ItemId": "lib-tv",
+				"LibraryOptions": map[string]any{
+					"EnableEmbeddedTitles":  false,
+					"EnableRealtimeMonitor": true,
+				},
+			}}, dest)
+		},
+		postNoContentFunc: func(_ context.Context, endpoint string, params url.Values, body any) error {
+			posts = append(posts, postCall{endpoint: endpoint, params: params, body: body})
+			return nil
+		},
+	}
+
+	promptRes := callTool(t, mc, "", "jellyfin_library_manage", map[string]any{
+		"action":          "update_options",
+		"folder_name":     "TV Shows",
+		"library_options": map[string]any{"EnableEmbeddedTitles": true},
+	})
+	promptText := resultText(t, promptRes)
+	for _, want := range []string{
+		"CONFIRMATION REQUIRED",
+		"Update options for library 'TV Shows'?",
+		"Changes: EnableEmbeddedTitles: false -> true.",
+		"Other library options stay unchanged.",
+	} {
+		if !strings.Contains(promptText, want) {
+			t.Errorf("missing %q in %s", want, promptText)
+		}
+	}
+	if len(posts) != 0 {
+		t.Fatalf("posts before confirmation = %d, want 0", len(posts))
+	}
+
+	unchangedRes := callTool(t, mc, "", "jellyfin_library_manage", map[string]any{
+		"action":          "update_options",
+		"folder_name":     "TV Shows",
+		"library_options": map[string]any{"EnableEmbeddedTitles": false},
+	})
+	if text := resultText(t, unchangedRes); unchangedRes.IsError || !strings.Contains(text, "already has those options; nothing changed") {
+		t.Errorf("expected no-op message, got: %s", text)
+	}
+
+	applyRes := callTool(t, mc, "", "jellyfin_library_manage", map[string]any{
+		"action":          "update_options",
+		"folder_name":     "TV Shows",
+		"library_options": map[string]any{"EnableEmbeddedTitles": true},
+		"confirm":         true,
+	})
+	if applyRes.IsError {
+		t.Fatalf("unexpected error: %s", resultText(t, applyRes))
+	}
+	if len(posts) != 1 {
+		t.Fatalf("posts = %d, want 1", len(posts))
+	}
+	wantBody := bodyShape(t, map[string]any{
+		"Id": "lib-tv",
+		"LibraryOptions": map[string]any{
+			"EnableEmbeddedTitles":  true,
+			"EnableRealtimeMonitor": true,
+		},
+	})
+	if got := bodyShape(t, posts[0].body); !reflect.DeepEqual(got, wantBody) {
+		t.Errorf("body = %v, want %v", got, wantBody)
+	}
+}
+
+func TestLibraryManage_DeleteItemDescribesScopeAndPath(t *testing.T) {
+	dels := 0
+	mc := &mockClient{
+		getFunc: func(_ context.Context, endpoint string, _ url.Values, dest any) error {
+			switch endpoint {
+			case "/Items/series-1":
+				return jsonInto(map[string]any{
+					"Name":     "Test Series",
+					"Type":     "Series",
+					"Path":     "/media/tv/Test Series",
+					"IsFolder": true,
+				}, dest)
+			case "/Items/missing-1":
+				return &jf.APIError{StatusCode: 404}
+			}
+			return nil
+		},
+		delFunc: func(context.Context, string, url.Values) error {
+			dels++
+			return nil
+		},
+	}
+
+	res := callTool(t, mc, "", "jellyfin_library_manage", map[string]any{"action": "delete_item", "item_id": "series-1"})
+	text := resultText(t, res)
+	for _, want := range []string{"CONFIRMATION REQUIRED", "Delete series 'Test Series' and all media files under '/media/tv/Test Series' permanently?", "Every child item and its files on disk are deleted"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing %q in %s", want, text)
+		}
+	}
+	if dels != 0 {
+		t.Errorf("dels = %d, want 0 without confirmation", dels)
+	}
+
+	missingDel := callTool(t, mc, "", "jellyfin_library_manage", map[string]any{"action": "delete_item", "item_id": "missing-1"})
+	if !missingDel.IsError || !strings.Contains(resultText(t, missingDel), "was not found") {
+		t.Errorf("expected 404 refusal before gating on delete_item, got: %s", resultText(t, missingDel))
+	}
+
+	missingRefresh := callTool(t, mc, "", "jellyfin_library_manage", map[string]any{"action": "refresh_item", "item_id": "missing-1", "replace_all_metadata": true})
+	if !missingRefresh.IsError || !strings.Contains(resultText(t, missingRefresh), "was not found") {
+		t.Errorf("expected 404 refusal before gating on refresh_item, got: %s", resultText(t, missingRefresh))
 	}
 }

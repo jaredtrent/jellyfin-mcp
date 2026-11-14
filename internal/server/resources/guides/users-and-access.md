@@ -14,15 +14,14 @@ The dashboard groups a user's settings into four tabs: Profile, Library Access, 
 
 ## Library Access
 
-Turn off access to all libraries and list the ones the account may see:
+Restrict an account to specific libraries by name or ID (which automatically turns off `enable_all_folders`):
 
 ~~~
-jellyfin_users action=update_policy user_id=<id>
-  enable_all_folders=false
-  enabled_folder_ids=["<library-id>", "<library-id>"]
+jellyfin_users action=update_policy user_id=<username-or-id>
+  enabled_folder_ids=["<library-name-or-id>", "<library-name-or-id>"]
 ~~~
 
-`jellyfin_libraries` lists the library IDs. An account without access to all libraries doesn't receive a library you add later, so grant it when you create the library. On the same tab, turning off access from all devices makes an administrator approve each new device the account signs in from.
+`jellyfin_libraries` lists your library names and IDs. An account without access to all libraries doesn't receive a library you add later, so grant it when you create the library. On the same tab in the dashboard, turning off access from all devices makes an administrator approve each new device the account signs in from.
 
 ## Parental Controls
 

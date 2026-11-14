@@ -2,10 +2,8 @@ package tools
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"maps"
-	"net/http"
 	"net/url"
 	"slices"
 	"strings"
@@ -21,12 +19,12 @@ func RegisterDiscoveryTools(server *mcp.Server, client jf.Client, enabled func(s
 	// --- jellyfin_libraries ---
 	if enabled("jellyfin_libraries", AnnotReadOnly) {
 		mcp.AddTool(server, &mcp.Tool{
-			Name:  "jellyfin_libraries",
-			Title: "List Libraries",
-			Description: "List all media libraries configured on the Jellyfin server, including Movies, TV Shows, Music, and other collection types. " +
-				"Use this tool first to discover available libraries and their IDs before browsing content with jellyfin_browse. " +
-				"Each library's item_id is the ID that parent_id, enabled_folder_ids, and jellyfin_library_manage scan take; the folder actions of jellyfin_library_manage take the library's name.",
-			Annotations: AnnotReadOnly,
+			Name:         "jellyfin_libraries",
+			Title:        "List Libraries",
+			InputSchema:  jf.SchemaFor[jf.NoInput](),
+			OutputSchema: jf.SchemaFor[jf.LibraryListOutput](),
+			Description:  "List configured media libraries with collection types, paths, and item IDs.",
+			Annotations:  AnnotReadOnly,
 		}, func(ctx context.Context, req *mcp.CallToolRequest, _ jf.NoInput) (*mcp.CallToolResult, *jf.LibraryListOutput, error) {
 			var libs []map[string]any
 			if err := client.Get(ctx, "/Library/VirtualFolders", nil, &libs); err != nil {
@@ -40,32 +38,64 @@ func RegisterDiscoveryTools(server *mcp.Server, client jf.Client, enabled func(s
 	// --- jellyfin_search ---
 	if enabled("jellyfin_search", AnnotReadOnly) {
 		mcp.AddTool(server, &mcp.Tool{
-			Name:  "jellyfin_search",
-			Title: "Search Media",
-			Description: "Search for media across the Jellyfin server by title or name keyword. " +
-				"Returns compact results (including WxH resolution on video); use jellyfin_get_item for full metadata. " +
-				"Keyword search only: use jellyfin_browse to filter by genre, year, rating, video resolution, language, or play state.",
+			Name:         "jellyfin_search",
+			Title:        "Search Media",
+			InputSchema:  jf.SchemaFor[jf.SearchInput](),
+			OutputSchema: jf.SchemaFor[jf.ItemListOutput](),
+			Description: "Search library items, people, studios, music artists, or genres by name. " +
+				"Returns compact summaries; use jellyfin_get_item for full metadata and jellyfin_browse for attribute filtering.",
 			Annotations: AnnotReadOnly,
 		}, func(ctx context.Context, req *mcp.CallToolRequest, args jf.SearchInput) (*mcp.CallToolResult, *jf.ItemListOutput, error) {
+			trimmedQuery := strings.TrimSpace(args.Query)
+			isCatalogType := args.Type == "Person" || args.Type == "Studio" || args.Type == "MusicArtist" || args.Type == "Genre"
+			if trimmedQuery == "" && !isCatalogType {
+				return jf.ErrResult("query is required unless type is Person, Studio, MusicArtist, or Genre (use jellyfin_browse to list library items without a search query)."), nil, nil
+			}
 			userID, err := client.GetUserID(ctx)
 			if err != nil {
 				return jf.ErrResult("Jellyfin error: %v", err), nil, nil
 			}
-			limit := jf.ClampInt(args.Limit, 30, jf.MaxLimitCap)
-			params := url.Values{
-				"UserId":     {userID},
-				"searchTerm": {args.Query},
-				"Limit":      {fmt.Sprintf("%d", limit)},
-				"Recursive":  {"true"},
-				"Fields":     {"Overview,Width,Height"},
+
+			defaultLimit := 30
+			if trimmedQuery == "" && isCatalogType {
+				defaultLimit = 50
 			}
-			// People, artists, and genres are not library items: /Items
-			// never lists them, so their names are searched on their own
-			// endpoints, which take the same searchTerm and Limit.
+			limit := jf.ClampInt(args.Limit, defaultLimit, jf.MaxLimitCap)
+
+			if args.Type == "Studio" {
+				studioParams := url.Values{"UserId": {userID}}
+				if args.Query != "" {
+					studioParams.Set("searchTerm", args.Query)
+				}
+				rawItems, total, err := jf.FetchAllPages(ctx, client, "/Studios", studioParams, limit)
+				if err != nil {
+					return jf.ErrResult("Jellyfin API error: %v", err), nil, nil
+				}
+				items := jf.MediaItemsFrom(rawItems)
+				output := &jf.ItemListOutput{TotalCount: total, Shown: len(items), Items: items}
+				if len(items) < total {
+					output.Notes = moreNote(len(items), total, limit, "refine query")
+				}
+				return nil, output, nil
+			}
+
+			params := url.Values{
+				"UserId":    {userID},
+				"Limit":     {fmt.Sprintf("%d", limit)},
+				"Recursive": {"true"},
+				"Fields":    {"Overview,Width,Height"},
+			}
+			if args.Query != "" {
+				params.Set("searchTerm", args.Query)
+			}
+
 			endpoint := "/Items"
 			switch args.Type {
 			case "Person":
 				endpoint = "/Persons"
+				params.Set("ExcludePersonTypes", "Artist,AlbumArtist")
+				params.Del("Recursive")
+				params.Del("Fields")
 			case "MusicArtist":
 				endpoint = "/Artists"
 			case "Genre":
@@ -82,14 +112,11 @@ func RegisterDiscoveryTools(server *mcp.Server, client jf.Client, enabled func(s
 			items := jf.ItemsFrom(result)
 			total := jf.GetInt(result, "TotalRecordCount")
 			output := &jf.ItemListOutput{TotalCount: total, Shown: len(items), Items: items}
-			// Jellyfin 12 ranks a window of at most three times limit
-			// candidates by relevance and reports the window's size as the
-			// total, so a full window means more may match.
-			if v, err := client.ServerVersion(ctx); err == nil && v.AtLeast(12, 0) && total >= 3*limit {
-				output.TotalIsLowerBound = true
+			if endpoint == "/Items" {
+				if v, err := client.ServerVersion(ctx); err == nil && v.AtLeast(12, 0) && total >= 3*limit {
+					output.TotalIsLowerBound = true
+				}
 			}
-			// The note never offers paging. Jellyfin 12 applies StartIndex
-			// inside the ranked window, so a page past it comes back empty.
 			if len(items) < total {
 				output.Notes = append(output.Notes, fmt.Sprintf("More results match than are shown. Refine the query, narrow it with type, or raise limit (up to %d) to see more.", jf.MaxLimitCap))
 			}
@@ -102,10 +129,12 @@ func RegisterDiscoveryTools(server *mcp.Server, client jf.Client, enabled func(s
 		mcp.AddTool(server, &mcp.Tool{
 			Name:  "jellyfin_browse",
 			Title: "Browse & Filter",
-			Description: "Browse, filter, and count (read total_count) library items by attributes; use jellyfin_search for title keywords and jellyfin_get_item for full metadata (genres, studios, cast, streams, provider IDs). " +
-				"Returns compact items (with WxH resolution on video), or series episode counts when group_by_series=true. " +
-				"Video resolution filters (is_hd, is_4k, min/max width/height) require video types (Movie, Episode, MusicVideo, Video); prefer is_hd/is_4k and width bounds over height, because cropped widescreen encodes have smaller heights. " +
-				fmt.Sprintf("Filtering by min_date_created or max_date_created scans at most the %d newest matching items.", jf.DefaultMaxItems),
+			InputSchema: jf.WithEnums[jf.BrowseInput](map[string][]any{
+				"resolution": {"sd", "720p", "1080p", "1440p", "4k", "8k"},
+			}),
+			OutputSchema: jf.SchemaFor[jf.ItemListOutput](),
+			Description: "Browse, filter, and count (total_count) library items by genre, year, studio, person, rating, language, resolution, date, or play state. " +
+				"Returns compact summaries (or matching series when group_by_series=true); use jellyfin_get_item for full metadata.",
 			Annotations: AnnotReadOnly,
 		}, func(ctx context.Context, req *mcp.CallToolRequest, args jf.BrowseInput) (*mcp.CallToolResult, *jf.ItemListOutput, error) {
 			window, byCreated, err := parseCreatedWindow(args.MinDateCreated, args.MaxDateCreated)
@@ -134,6 +163,14 @@ func RegisterDiscoveryTools(server *mcp.Server, client jf.Client, enabled func(s
 					return jf.ErrResult("group_by_series lists the series by name, so sort_by and sort_order must be omitted."), nil, nil
 				}
 			}
+			if args.Resolution != "" {
+				if args.IsHD != nil || args.Is4K != nil || args.MinWidth != nil || args.MaxWidth != nil || args.MinHeight != nil || args.MaxHeight != nil {
+					return jf.ErrResult("resolution cannot be combined with is_hd, is_4k, min_width, max_width, min_height, or max_height."), nil, nil
+				}
+				if errRes := applyResolutionTier(&args, &itemTypes); errRes != nil {
+					return errRes, nil, nil
+				}
+			}
 			for _, f := range []struct {
 				name  string
 				value *int
@@ -148,10 +185,8 @@ func RegisterDiscoveryTools(server *mcp.Server, client jf.Client, enabled func(s
 			if args.MinHeight != nil && args.MaxHeight != nil && *args.MinHeight > *args.MaxHeight {
 				return jf.ErrResult("min_height (%d) is greater than max_height (%d).", *args.MinHeight, *args.MaxHeight), nil, nil
 			}
-			// Jellyfin reads IsHD and Is4K as buckets to include, and
-			// Is4K=false includes none, so it alone matches nothing.
 			if args.Is4K != nil && !*args.Is4K {
-				return jf.ErrResult("is_4k=false matches nothing: Jellyfin treats is_4k as a bucket to include. Omit is_4k and use is_hd=true alone for HD without 4K/8K, is_hd=false for standard definition, or each in turn for everything below 4K."), nil, nil
+				return jf.ErrResult("is_4k=false matches nothing: Jellyfin treats is_4k as a bucket to include. Omit is_4k and use resolution='1080p'/'720p'/'sd', is_hd=true alone for HD without 4K/8K, or is_hd=false for standard definition."), nil, nil
 			}
 			audioLangs, subtitleLangs := commaList(args.AudioLanguages), commaList(args.SubtitleLanguages)
 			for _, f := range []struct{ name, given, codes string }{{"audio_languages", args.AudioLanguages, audioLangs}, {"subtitle_languages", args.SubtitleLanguages, subtitleLangs}} {
@@ -166,8 +201,6 @@ func RegisterDiscoveryTools(server *mcp.Server, client jf.Client, enabled func(s
 				return errResult, nil, nil
 			}
 			if audioLangs != "" || subtitleLangs != "" {
-				// Jellyfin 10.11 ignores these parameters and would return
-				// unfiltered results.
 				v, err := client.ServerVersion(ctx)
 				if err != nil {
 					return jf.ErrResult("audio_languages and subtitle_languages need Jellyfin 12 or later, and the server's version could not be read: %v. Use jellyfin_get_item to inspect audio_streams or subtitle_streams on individual items.", err), nil, nil
@@ -180,21 +213,21 @@ func RegisterDiscoveryTools(server *mcp.Server, client jf.Client, enabled func(s
 			if err != nil {
 				return jf.ErrResult("Jellyfin error: %v", err), nil, nil
 			}
-			// Another user is looked up once, here, so an unknown ID gets one
-			// clear error whichever request path the filters take, and the
-			// result can name whose play state it shows.
 			var userNote []string
 			if args.UserID != "" {
-				var user map[string]any
-				if err := client.Get(ctx, "/Users/"+jf.SanitizeID(args.UserID), nil, &user); err != nil {
-					var apiErr *jf.APIError
-					if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusNotFound || apiErr.StatusCode == http.StatusBadRequest) {
-						return jf.ErrResult("No user has ID '%s'. Use jellyfin_users action=list to find user IDs.", args.UserID), nil, nil
-					}
-					return jf.ErrResult("Jellyfin error: %v", err), nil, nil
+				resolvedID, resolvedName, _, err := jf.ResolveUser(ctx, client, args.UserID)
+				if err != nil {
+					return jf.ResolveErrResult(err), nil, nil
 				}
-				userID = jf.GetString(user, "Id")
-				userNote = []string{fmt.Sprintf("Played state, favorites, and last_played are those of user '%s'.", jf.GetString(user, "Name"))}
+				userID = resolvedID
+				userNote = []string{fmt.Sprintf("Played state, favorites, and last_played are those of user '%s'.", resolvedName)}
+			}
+			if args.ParentID != "" {
+				resolvedParent, err := jf.ResolveLibraryID(ctx, client, args.ParentID)
+				if err != nil {
+					return jf.ErrResult("Invalid parent_id: %v", err), nil, nil
+				}
+				args.ParentID = resolvedParent
 			}
 			limit := jf.ClampInt(args.Limit, 50, jf.MaxLimitCap)
 			startIndex := max(args.StartIndex, 0)
@@ -209,8 +242,6 @@ func RegisterDiscoveryTools(server *mcp.Server, client jf.Client, enabled func(s
 			if itemTypes != "" {
 				params.Set("IncludeItemTypes", itemTypes)
 			} else {
-				// A recursive listing under a library includes the folders of
-				// its paths, which are not media.
 				params.Set("ExcludeItemTypes", "Folder")
 			}
 			if args.Genre != "" {
@@ -223,7 +254,16 @@ func RegisterDiscoveryTools(server *mcp.Server, client jf.Client, enabled func(s
 				params.Set("Studios", args.Studio)
 			}
 			if args.Person != "" {
-				params.Set("Person", args.Person)
+				parts := jf.SplitIDs([]string{args.Person})
+				if len(parts) > 0 && !slices.ContainsFunc(parts, func(p string) bool { return !jf.IsJellyfinID(p) }) {
+					norm := make([]string, len(parts))
+					for i, p := range parts {
+						norm[i] = jf.NormalizeID(p)
+					}
+					params.Set("PersonIds", strings.Join(norm, ","))
+				} else {
+					params.Set("Person", args.Person)
+				}
 			}
 			if args.Tags != "" {
 				params.Set("Tags", args.Tags)
@@ -257,16 +297,12 @@ func RegisterDiscoveryTools(server *mcp.Server, client jf.Client, enabled func(s
 			if args.Is4K != nil {
 				params.Set("Is4K", "true")
 			}
-			// Jellyfin gives a video it could not measure, such as a .strm
-			// link, a width and height of 0, which passes every maximum.
 			if args.MaxWidth != nil && args.MinWidth == nil {
 				params.Set("MinWidth", "1")
 			}
 			if args.MaxHeight != nil && args.MinHeight == nil {
 				params.Set("MinHeight", "1")
 			}
-			// Jellyfin 10.11 also counts them as standard definition, where
-			// Jellyfin 12 skips them. A series has no width of its own.
 			if args.IsHD != nil && !*args.IsHD && args.MinWidth == nil && !strings.EqualFold(itemTypes, "Series") {
 				params.Set("MinWidth", "1")
 			}
@@ -276,10 +312,11 @@ func RegisterDiscoveryTools(server *mcp.Server, client jf.Client, enabled func(s
 			if subtitleLangs != "" {
 				params.Set("SubtitleLanguages", subtitleLangs)
 			}
-			noMatches := func() []string { return languageHint(ctx, client, userID, args, audioLangs, subtitleLangs) }
-			// Jellyfin 12 matches stream and resolution-bucket filters against
-			// every version and part of a video, and lists each match as its
-			// own item.
+			noMatches := func() []string {
+				a := args
+				a.ParentID = params.Get("ParentId")
+				return languageHint(ctx, client, userID, a, audioLangs, subtitleLangs)
+			}
 			var perVersion, seriesVersionNote []string
 			if strings.EqualFold(itemTypes, "Series") && (args.IsHD != nil || args.Is4K != nil) {
 				ancestorNote := []string{"Series resolution filters read Jellyfin's ancestor index (mixed-resolution shows can match both buckets, and out-of-sync series can be missed); use type=Episode with group_by_series=true for complete results and episode counts."}
@@ -337,7 +374,6 @@ func RegisterDiscoveryTools(server *mcp.Server, client jf.Client, enabled func(s
 			rawItems := jf.ToSlice(result["Items"])
 			items := jf.MediaItemsFrom(rawItems)
 			if strings.EqualFold(args.SortBy, "DatePlayed") {
-				// Sorted by play date, the date is what the caller is after.
 				for i, raw := range rawItems {
 					if lp := jf.LastPlayedOf(jf.ToMap(raw)); lp != "" {
 						items[i].LastPlayed = jf.LocalDateTime(lp)
@@ -361,14 +397,16 @@ func RegisterDiscoveryTools(server *mcp.Server, client jf.Client, enabled func(s
 	// --- jellyfin_get_item ---
 	if enabled("jellyfin_get_item", AnnotReadOnly) {
 		mcp.AddTool(server, &mcp.Tool{
-			Name:  "jellyfin_get_item",
-			Title: "Item Details",
-			Description: "Get comprehensive details about a specific media item by its ID. Returns full metadata including overview, genres, studios, cast/crew, " +
-				"community and critic ratings, runtime, provider IDs (IMDb, TMDB, TVDB), user data (played status, favorite, rating), " +
-				"media source info (codecs, resolution, bitrate, bit depth, HDR format, all audio tracks, all subtitle tracks with languages), " +
-				"chapters (with start_ticks to seek to), and on Jellyfin 12 or later the original language and the collections that include the item.",
-			Annotations: AnnotReadOnly,
+			Name:         "jellyfin_get_item",
+			Title:        "Item Details",
+			InputSchema:  jf.SchemaFor[jf.GetItemInput](),
+			OutputSchema: jf.SchemaFor[jf.DetailedItemOutput](),
+			Description:  "Get full item metadata: overview, genres, studios, cast/crew, ratings, provider IDs/external URLs, user play state, media streams (codecs, HDR, audio/subtitle tracks), chapters, and collections.",
+			Annotations:  AnnotReadOnly,
 		}, func(ctx context.Context, req *mcp.CallToolRequest, args jf.GetItemInput) (*mcp.CallToolResult, *jf.DetailedItemOutput, error) {
+			if strings.TrimSpace(args.ItemID) == "" {
+				return jf.ErrResultWithHint("Use jellyfin_search to find valid item IDs.", "item_id is required."), nil, nil
+			}
 			userID, err := client.GetUserID(ctx)
 			if err != nil {
 				return jf.ErrResult("Jellyfin error: %v", err), nil, nil
@@ -389,21 +427,19 @@ func RegisterDiscoveryTools(server *mcp.Server, client jf.Client, enabled func(s
 			InputSchema: jf.WithEnums[jf.RecommendationsInput](map[string][]any{
 				"action": {"next_up", "suggestions", "latest", "similar", "movie_recs", "upcoming", "recently_played"},
 			}),
-			Description: "Get personalized content recommendations from Jellyfin. Returns compact results. Use jellyfin_get_item for full metadata. " +
-				"Common use cases: 'What should I watch?' -> try 'suggestions' for mixed content or 'movie_recs' for movies. " +
-				"'What is next in my shows?' -> use 'next_up'. 'What is new on the server?' -> use 'latest'. " +
-				"'More like this movie' -> use 'similar' with item_id. For what the user actually watched, use jellyfin_system_info playback_history; 'recently_played' also lists items marked played by hand.",
-			Annotations: AnnotReadOnly,
+			OutputSchema: jf.SchemaFor[jf.RecommendationsOutput](),
+			Description:  "Get personalized suggestions, next-up or upcoming episodes, latest library additions, similar items, movie recommendation groups, or recently marked-played items.",
+			Annotations:  AnnotReadOnly,
 		}, func(ctx context.Context, req *mcp.CallToolRequest, args jf.RecommendationsInput) (*mcp.CallToolResult, *jf.RecommendationsOutput, error) {
 			limit := jf.ClampInt(args.Limit, 25, jf.MaxLimitCap)
-			userID, err := client.GetUserID(ctx)
+			userID, err := jf.EffectiveUserID(ctx, client, args.UserID)
 			if err != nil {
-				return jf.ErrResult("Jellyfin error: %v", err), nil, nil
+				return jf.ResolveErrResult(err), nil, nil
 			}
 
 			switch args.Action {
 			case "next_up":
-				maxItems := jf.ClampInt(args.Limit, 100, jf.MaxLimitCap)
+				maxItems := jf.ClampInt(args.Limit, 25, jf.MaxLimitCap)
 				params := url.Values{
 					"UserId": {userID},
 					"Fields": {"Overview"},
@@ -428,7 +464,15 @@ func RegisterDiscoveryTools(server *mcp.Server, client jf.Client, enabled func(s
 				return nil, &jf.RecommendationsOutput{Items: &items}, nil
 
 			case "latest":
-				items, err := jf.FetchLatest(ctx, client, args.ParentID, limit)
+				parentID := args.ParentID
+				if parentID != "" {
+					resolved, err := jf.ResolveLibraryID(ctx, client, parentID)
+					if err != nil {
+						return jf.ErrResult("Invalid parent_id: %v", err), nil, nil
+					}
+					parentID = resolved
+				}
+				items, err := jf.FetchLatestForUser(ctx, client, userID, parentID, limit)
 				if err != nil {
 					return jf.ErrResult("Jellyfin API error: %v", err), nil, nil
 				}
@@ -459,8 +503,6 @@ func RegisterDiscoveryTools(server *mcp.Server, client jf.Client, enabled func(s
 				if err := client.Get(ctx, "/Movies/Recommendations", params, &result); err != nil {
 					return jf.ErrResult("Jellyfin API error: %v", err), nil, nil
 				}
-				// Jellyfin lists a movie under every reason that recommends
-				// it; here it appears once, in the first group of its type.
 				seen := make(map[string]bool)
 				grouped := make(map[string]*jf.RecommendationCategory)
 				categories := make([]jf.RecommendationCategory, 0, len(result))
@@ -484,7 +526,7 @@ func RegisterDiscoveryTools(server *mcp.Server, client jf.Client, enabled func(s
 				return nil, &jf.RecommendationsOutput{Categories: &categories}, nil
 
 			case "upcoming":
-				maxItems := jf.ClampInt(args.Limit, 100, jf.MaxLimitCap)
+				maxItems := jf.ClampInt(args.Limit, 25, jf.MaxLimitCap)
 				params := url.Values{
 					"UserId": {userID},
 					"Fields": {"Overview"},
@@ -497,7 +539,7 @@ func RegisterDiscoveryTools(server *mcp.Server, client jf.Client, enabled func(s
 				return nil, &jf.RecommendationsOutput{Items: &items, Notes: moreNote(len(items), total, maxItems, "")}, nil
 
 			case "recently_played":
-				maxItems := jf.ClampInt(args.Limit, 500, jf.MaxLimitCap)
+				maxItems := jf.ClampInt(args.Limit, 50, jf.MaxLimitCap)
 				params := url.Values{
 					"UserId":    {userID},
 					"Recursive": {"true"},
@@ -516,7 +558,7 @@ func RegisterDiscoveryTools(server *mcp.Server, client jf.Client, enabled func(s
 						items[i].LastPlayed = jf.LocalDate(lp)
 					}
 				}
-				return nil, &jf.RecommendationsOutput{Items: &items, TotalCount: &total}, nil
+				return nil, &jf.RecommendationsOutput{Items: &items, TotalCount: &total, Notes: moreNote(len(items), total, maxItems, "")}, nil
 
 			default:
 				return jf.ErrResult("Invalid action '%s'. Valid actions: next_up, suggestions, latest, similar, movie_recs, upcoming, recently_played", args.Action), nil, nil
@@ -528,17 +570,11 @@ func RegisterDiscoveryTools(server *mcp.Server, client jf.Client, enabled func(s
 	if enabled("jellyfin_item_extras", AnnotReadOnly) {
 		mcp.AddTool(server, &mcp.Tool{
 			Name:  "jellyfin_item_extras",
-			Title: "Item Extras",
+			Title: "Item Extras & Download Link",
 			InputSchema: jf.WithEnums[jf.ItemExtrasInput](map[string][]any{
-				"action": {"playback_info", "special_features", "theme_songs", "theme_videos", "local_trailers", "segments"},
+				"action": {"playback_info", "special_features", "theme_songs", "theme_videos", "local_trailers", "segments", "download_link"},
 			}),
-			Description: "Get extended item information beyond basic metadata. " +
-				"Use 'playback_info' for transcoding/direct play diagnostics (shows SupportsDirectPlay, SupportsTranscoding, TranscodingUrl). " +
-				"Use 'special_features' for behind-the-scenes, extras, featurettes. " +
-				"Use 'theme_songs' or 'theme_videos' for theme media. Use 'local_trailers' for trailers. " +
-				"Use 'segments' for intro/outro/commercial markers. " +
-				"For a download link, use jellyfin_download_link. " +
-				"All actions require item_id from jellyfin_search or jellyfin_browse.",
+			Description: "Fetch item playback/transcoding capabilities, special features, local trailers, theme songs/videos, intro/outro segments, or web app download link (with file path and size).",
 			Annotations: AnnotReadOnly,
 		}, func(ctx context.Context, req *mcp.CallToolRequest, args jf.ItemExtrasInput) (*mcp.CallToolResult, any, error) {
 			if args.ItemID == "" {
@@ -654,74 +690,88 @@ func RegisterDiscoveryTools(server *mcp.Server, client jf.Client, enabled func(s
 				}
 				return jf.TextResult(fmt.Sprintf("Media segments (%d):\n\n%s", len(segments), jf.FormatJSON(segments))), nil, nil
 
-			default:
-				return jf.ErrResult("Invalid action '%s'. Valid actions: playback_info, special_features, theme_songs, theme_videos, local_trailers, segments", args.Action), nil, nil
-			}
-		})
-	}
+			case "download_link":
+				userID, err := client.GetUserID(ctx)
+				if err != nil {
+					return jf.ErrResult("Jellyfin error: %v", err), nil, nil
+				}
+				var item map[string]any
+				if err := client.Get(ctx, fmt.Sprintf("/Items/%s", itemID), url.Values{"UserId": {userID}}, &item); err != nil {
+					return jf.ErrResult("Jellyfin API error: %v", err), nil, nil
+				}
+				link := map[string]any{
+					"name":     jf.GetString(item, "Name"),
+					"web_page": fmt.Sprintf("%s/web/#/details?id=%s", client.BaseURL(), itemID),
+				}
+				if p := jf.GetString(item, "Path"); p != "" {
+					link["file_path"] = p
+				}
+				var size int64
+				for _, src := range jf.ToSlice(item["MediaSources"]) {
+					size += jf.GetInt64(jf.ToMap(src), "Size")
+				}
+				if size > 0 {
+					link["file_size_bytes"] = size
+				}
+				return jf.TextResult(fmt.Sprintf("Open this page in the Jellyfin web app and use its Download button (the download runs with the signed-in user's own permissions):\n\n%s", jf.FormatJSON(link))), nil, nil
 
-	// --- jellyfin_download_link ---
-	if enabled("jellyfin_download_link", AnnotReadOnly) {
-		mcp.AddTool(server, &mcp.Tool{
-			Name:        "jellyfin_download_link",
-			Title:       "Download Link",
-			InputSchema: jf.WithEnums[jf.DownloadLinkInput](nil),
-			Description: "Get the link to download an item: its page in the Jellyfin web app, where a signed-in user downloads the file with their own account, plus the file's path and size. " +
-				"Use this whenever someone asks for a download link or wants to save a file from the server. " +
-				"The item_id comes from jellyfin_search or jellyfin_browse.",
-			Annotations: AnnotReadOnly,
-		}, func(ctx context.Context, req *mcp.CallToolRequest, args jf.DownloadLinkInput) (*mcp.CallToolResult, any, error) {
-			if args.ItemID == "" {
-				return jf.ErrResultWithHint("Use jellyfin_search to find item IDs.", "item_id is required."), nil, nil
+			default:
+				return jf.ErrResult("Invalid action '%s'. Valid actions: playback_info, special_features, theme_songs, theme_videos, local_trailers, segments, download_link", args.Action), nil, nil
 			}
-			itemID := jf.SanitizeID(args.ItemID)
-			// The download route needs the API key, which must not reach the
-			// client, so the link opens the item in the Jellyfin web app,
-			// where the signed-in user downloads it with their own account
-			// and Jellyfin's per-user download permission applies.
-			userID, err := client.GetUserID(ctx)
-			if err != nil {
-				return jf.ErrResult("Jellyfin error: %v", err), nil, nil
-			}
-			var item map[string]any
-			if err := client.Get(ctx, fmt.Sprintf("/Items/%s", itemID), url.Values{"UserId": {userID}}, &item); err != nil {
-				return jf.ErrResult("Jellyfin API error: %v", err), nil, nil
-			}
-			link := map[string]any{
-				"name":     jf.GetString(item, "Name"),
-				"web_page": fmt.Sprintf("%s/web/#/details?id=%s", client.BaseURL(), itemID),
-			}
-			if p := jf.GetString(item, "Path"); p != "" {
-				link["file_path"] = p
-			}
-			var size int64
-			for _, src := range jf.ToSlice(item["MediaSources"]) {
-				size += jf.GetInt64(jf.ToMap(src), "Size")
-			}
-			if size > 0 {
-				link["file_size_bytes"] = size
-			}
-			return jf.TextResult(fmt.Sprintf("Open this page in the Jellyfin web app and use its Download button (the download runs with the signed-in user's own permissions):\n\n%s", jf.FormatJSON(link))), nil, nil
 		})
 	}
 }
 
-// createdWindow is a range of DateCreated values. Both ends are inclusive, and
-// a zero end is open.
+func intPtr(v int) *int { return &v }
+
+// applyResolutionTier maps a friendly resolution tier ("sd", "720p", "1080p",
+// "1440p", "4k", "8k") to IsHD/Is4K + pixel bounds so cropped widescreen
+// encodes, 4:3 HD/UHD transfers, DCI 4K, and portrait 4K all match their tier,
+// and defaults type to video item types when omitted.
+func applyResolutionTier(args *jf.BrowseInput, itemTypes *string) *mcp.CallToolResult {
+	if *itemTypes == "" {
+		*itemTypes = strings.Join(videoTypes, ",")
+	}
+	switch strings.ToLower(strings.TrimSpace(args.Resolution)) {
+	case "sd":
+		args.IsHD = jf.BoolPtr(false)
+	case "720p":
+		args.IsHD = jf.BoolPtr(true)
+		args.MaxWidth = intPtr(1799)
+		args.MaxHeight = intPtr(999)
+	case "1080p":
+		args.IsHD = jf.BoolPtr(true)
+		args.MinWidth = intPtr(1400)
+		args.MaxWidth = intPtr(2499)
+		args.MaxHeight = intPtr(1399)
+	case "1440p":
+		args.IsHD = jf.BoolPtr(true)
+		args.MinWidth = intPtr(2500)
+		args.MaxWidth = intPtr(3799)
+		args.MaxHeight = intPtr(2099)
+	case "4k":
+		args.Is4K = jf.BoolPtr(true)
+		args.MaxWidth = intPtr(7599)
+		args.MaxHeight = intPtr(4199)
+	case "8k":
+		args.Is4K = jf.BoolPtr(true)
+		args.MinWidth = intPtr(7600)
+	default:
+		return jf.ErrResult("Invalid resolution %q. Valid values: sd, 720p, 1080p, 1440p, 4k, 8k.", args.Resolution)
+	}
+	return nil
+}
+
 type createdWindow struct {
 	min, max time.Time
 }
 
-// createdScan is what scanCreated found.
 type createdScan struct {
-	items   []map[string]any // raw items inside the window, newest first
-	undated int              // items left out because DateCreated was absent or unreadable
-	capped  bool             // the scan reached its bound, so older matches may be missing
+	items   []map[string]any
+	undated int
+	capped  bool
 }
 
-// parseCreatedWindow reads the min_date_created and max_date_created inputs
-// and reports whether either is set. A YYYY-MM-DD date covers that whole day
-// in the server's time zone (see parseDateArg); an RFC 3339 timestamp is exact.
 func parseCreatedWindow(minArg, maxArg string) (createdWindow, bool, error) {
 	var w createdWindow
 	if minArg != "" {
@@ -744,11 +794,6 @@ func parseCreatedWindow(minArg, maxArg string) (createdWindow, bool, error) {
 	return w, minArg != "" || maxArg != "", nil
 }
 
-// parseDateArg parses a date input given as YYYY-MM-DD, which it reads as the
-// start of that day in the server's time zone and reports as date-only, or as
-// an RFC 3339 timestamp. The server's time zone is the one the server
-// instructions give the current date in, so a date the model derives from them
-// means the day it intends.
 func parseDateArg(name, s string) (time.Time, bool, error) {
 	if t, err := time.Parse(jf.DateOnlyFormat, s); err == nil {
 		y, m, d := t.Date()
@@ -760,8 +805,6 @@ func parseDateArg(name, s string) (time.Time, bool, error) {
 	return time.Time{}, false, fmt.Errorf("%s must be a date such as 2024-01-31 or an RFC 3339 timestamp such as 2024-01-31T18:00:00Z, not %q", name, s)
 }
 
-// commaList trims the entries of a comma-separated list and drops empty or
-// repeated ones.
 func commaList(s string) string {
 	var entries []string
 	for _, e := range strings.Split(s, ",") {
@@ -772,13 +815,6 @@ func commaList(s string) string {
 	return strings.Join(entries, ",")
 }
 
-// languageHint explains a language filter that matched nothing: for each
-// requested code that no item in the browsed scope has, it lists the codes
-// that do occur. It returns "" when every code occurs, because then another
-// filter excluded the items. Jellyfin reports stream languages only for video
-// types, so a non-video type gets no hint, and an untyped browse asks about
-// movies, series, and episodes. audio and subtitle are the comma-separated
-// code lists sent.
 func languageHint(ctx context.Context, client jf.Client, userID string, args jf.BrowseInput, audio, subtitle string) []string {
 	if audio == "" && subtitle == "" {
 		return nil
@@ -818,7 +854,6 @@ func languageHint(ctx context.Context, client jf.Client, userID string, args jf.
 				continue
 			}
 			present[code] = true
-			// Jellyfin names a language "English (eng)", or by its code alone.
 			if name := strings.TrimSuffix(jf.GetString(m, "Name"), " ("+code+")"); name != "" && name != code {
 				code += " (" + name + ")"
 			}
@@ -841,9 +876,6 @@ func languageHint(ctx context.Context, client jf.Client, userID string, args jf.
 	return hint
 }
 
-// parseMaxDateArg parses an upper date bound given as for parseDateArg. A
-// YYYY-MM-DD date includes that whole day, so it ends at the last instant
-// before the next day starts.
 func parseMaxDateArg(name, s string) (time.Time, error) {
 	t, dateOnly, err := parseDateArg(name, s)
 	if err != nil || !dateOnly {
@@ -853,18 +885,11 @@ func parseMaxDateArg(name, s string) (time.Time, error) {
 	return startOfDay(y, m, d+1, time.Local).Add(-time.Nanosecond), nil
 }
 
-// startOfDay returns the first instant of the given day in loc. The day
-// normally starts at midnight, but where a clock change skips midnight, such as
-// a daylight saving start at 00:00, it starts when the new offset takes effect.
-// d may be out of range, as time.Date allows.
 func startOfDay(y int, m time.Month, d int, loc *time.Location) time.Time {
 	t := time.Date(y, m, d, 0, 0, 0, 0, loc)
 	if t.Hour() == 0 {
 		return t
 	}
-	// Midnight is in the gap. time.Date puts it either after the gap, which is
-	// the day's start, or late on the previous day at the old offset, in which
-	// case the day starts where that offset ends.
 	if noon := time.Date(y, m, d, 12, 0, 0, 0, loc); t.Day() != noon.Day() {
 		_, end := t.ZoneBounds()
 		return end
@@ -872,13 +897,6 @@ func startOfDay(y int, m time.Month, d int, loc *time.Location) time.Time {
 	return t
 }
 
-// scanCreated lists /Items newest first by DateCreated and keeps the items
-// inside w. It sets SortBy, SortOrder, and Fields in params. The endpoint has
-// no creation-date filter, so the window is applied here: items newer than
-// w.max are skipped, and paging stops at the first item older than w.min. At
-// most jf.DefaultMaxItems items are examined. An item without a readable
-// DateCreated cannot be placed in the window; it is left out and counted
-// rather than ending the scan.
 func scanCreated(ctx context.Context, client jf.Client, params url.Values, w createdWindow) (createdScan, error) {
 	params.Set("SortBy", "DateCreated")
 	params.Set("SortOrder", "Descending")
@@ -901,9 +919,6 @@ func scanCreated(ctx context.Context, client jf.Client, params url.Values, w cre
 	}
 
 	scan := createdScan{capped: len(rawItems) >= jf.DefaultMaxItems && total > len(rawItems)}
-	// Offset paging over a list that can grow while it is read can return an
-	// item on two pages: an addition at the top pushes the previous page's last
-	// item onto the next one. Each item is counted once.
 	seen := make(map[string]bool, len(rawItems))
 	for _, raw := range rawItems {
 		m := jf.ToMap(raw)
@@ -918,7 +933,6 @@ func scanCreated(ctx context.Context, client jf.Client, params url.Values, w cre
 		case !ok:
 			scan.undated++
 		case !w.max.IsZero() && created.After(w.max):
-			// Newer than the window.
 		default:
 			scan.items = append(scan.items, m)
 		}
@@ -926,8 +940,6 @@ func scanCreated(ctx context.Context, client jf.Client, params url.Values, w cre
 	return scan, nil
 }
 
-// notes explains what the scan could not cover. The undated count is a
-// field of the result; the note is for the bound.
 func (s createdScan) notes() []string {
 	if s.capped {
 		return []string{fmt.Sprintf("Only the %d most recently added items were examined, so older matches are not included. Narrow the request with filters such as type or parent_id to reach them.", jf.DefaultMaxItems)}
@@ -935,8 +947,6 @@ func (s createdScan) notes() []string {
 	return nil
 }
 
-// page is the scan's items from start to end, newest first, each with its
-// date added.
 func (s createdScan) page(start, end int) []jf.MediaItem {
 	items := make([]jf.MediaItem, 0, end-start)
 	for _, m := range s.items[start:end] {
@@ -949,12 +959,8 @@ func (s createdScan) page(start, end int) []jf.MediaItem {
 	return items
 }
 
-// videoTypes are the item types that carry video of their own. Jellyfin
-// records a width and height of 0 for the rest, which passes every maximum.
 var videoTypes = []string{"Movie", "Episode", "MusicVideo", "Video"}
 
-// hasVideoType reports whether a normalized comma-separated type list names an
-// item type that carries video of its own.
 func hasVideoType(itemTypes string) bool {
 	for _, e := range strings.Split(itemTypes, ",") {
 		if slices.ContainsFunc(videoTypes, func(v string) bool { return strings.EqualFold(e, v) }) {
@@ -964,12 +970,6 @@ func hasVideoType(itemTypes string) bool {
 	return false
 }
 
-// checkResolutionFilters refuses video resolution filters that would return a
-// wrong answer without an error: a type with no video of its own, or a series
-// on a server older than Jellyfin 12, which tests the series' own width of 0
-// where later versions test its episodes. itemTypes is the trimmed,
-// comma-separated list of requested types. It returns a result to send back,
-// or nil when the filters are fine.
 func checkResolutionFilters(ctx context.Context, client jf.Client, args jf.BrowseInput, itemTypes string) *mcp.CallToolResult {
 	pixels := args.MinHeight != nil || args.MaxHeight != nil || args.MinWidth != nil || args.MaxWidth != nil
 	if !pixels && args.IsHD == nil && args.Is4K == nil {
@@ -996,6 +996,9 @@ func checkResolutionFilters(ctx context.Context, client jf.Client, args jf.Brows
 		return !slices.ContainsFunc(videoTypes, func(v string) bool { return strings.EqualFold(e, v) })
 	})
 	if !allowed {
+		if args.Resolution != "" {
+			return jf.ErrResult("resolution requires video item types (Movie, Episode, MusicVideo, or Video; omit type to include all four). To list TV shows by resolution, use type=Episode with group_by_series=true.")
+		}
 		if pixels {
 			return jf.ErrResult("min_width, max_width, min_height, and max_height need type=Movie, Episode, MusicVideo, or Video (or a comma-separated list of them), because other items have no video of their own. To list shows by resolution, use type=Episode with group_by_series=true.")
 		}
@@ -1004,24 +1007,15 @@ func checkResolutionFilters(ctx context.Context, client jf.Client, args jf.Brows
 	return nil
 }
 
-// seriesTally holds the distinct episode rows of one series seen in a scan.
 type seriesTally struct {
 	name     string
 	episodes map[string]struct{}
 }
 
-// tallyEpisodesBySeries walks every episode on disk that params match and
-// groups them by series. Episodes are keyed by ID so an item repeated across a
-// page boundary when the library changes mid-scan counts once; step tracks the
-// progress value across consecutive scans so notifications strictly increase.
 func tallyEpisodesBySeries(ctx context.Context, req *mcp.CallToolRequest, client jf.Client, params url.Values, what string, step *int) (map[string]*seriesTally, error) {
 	p := maps.Clone(params)
 	p.Del("Fields")
-	// Missing episodes are placeholders a metadata provider adds for episodes
-	// the library lacks; they have a width of 0, so a resolution scan skips
-	// them and the total scan would otherwise count them.
 	p.Set("IsMissing", "false")
-	// The tally reads only IDs and series names.
 	p.Set("EnableImages", "false")
 	p.Set("EnableUserData", "false")
 	tallies := make(map[string]*seriesTally)
@@ -1048,11 +1042,6 @@ func tallyEpisodesBySeries(ctx context.Context, req *mcp.CallToolRequest, client
 	return tallies, err
 }
 
-// browseSeries lists the series that have an episode matching params, each
-// once and by name, with how many of its episodes match and how many it has.
-// The totals come from a second scan without the video resolution filters,
-// which only runs when there are filters to drop. When nothing matches, the
-// result's notes come from noMatches, and otherwise from notes.
 func browseSeries(ctx context.Context, req *mcp.CallToolRequest, client jf.Client, params url.Values, byResolution bool, startIndex, limit int, noMatches func() []string, notes []string) (*mcp.CallToolResult, *jf.ItemListOutput, error) {
 	var step int
 	matching, err := tallyEpisodesBySeries(ctx, req, client, params, "matching episodes", &step)
@@ -1077,11 +1066,6 @@ func browseSeries(ctx context.Context, req *mcp.CallToolRequest, client jf.Clien
 			if name == "" {
 				name = all.name
 			}
-			// On Jellyfin 12, is_hd and is_4k can return alternate versions and
-			// additional parts under their own IDs while the unfiltered totals
-			// scan returns only primary episodes, so max keeps total_episodes at
-			// least matching_episodes without counting a version and its primary
-			// twice.
 			totalEpisodes = max(len(all.episodes), len(t.episodes))
 		}
 		list = append(list, jf.MediaItem{ID: id, Name: name, Type: "Series", MatchingEpisodes: len(t.episodes), TotalEpisodes: totalEpisodes})
@@ -1110,11 +1094,6 @@ func browseSeries(ctx context.Context, req *mcp.CallToolRequest, client jf.Clien
 	return nil, output, nil
 }
 
-// browseCreated answers jellyfin_browse when a creation-date filter is set.
-// The window is applied by scanCreated, so start_index and limit page through
-// the filtered list here, and the total counts only matching items. When
-// nothing matches, the result's notes end with what noMatches returns, and
-// otherwise with perVersion.
 func browseCreated(ctx context.Context, client jf.Client, params url.Values, w createdWindow, startIndex, limit int, noMatches func() []string, perVersion []string) (*mcp.CallToolResult, *jf.ItemListOutput, error) {
 	scan, err := scanCreated(ctx, client, params, w)
 	if err != nil {

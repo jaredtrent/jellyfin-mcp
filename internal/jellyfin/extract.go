@@ -1,6 +1,9 @@
 package jellyfin
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // MediaItemFrom is the compact form of a raw Jellyfin item, as lists show
 // it. The overview is truncated to OverviewMaxLen. last_played and date_added
@@ -203,17 +206,24 @@ func DetailedItemFrom(m map[string]any) DetailedItemOutput {
 
 	item.FilePath = GetString(m, "Path")
 
+	hasVideoSource := false
 	for _, src := range ToSlice(m["MediaSources"]) {
 		if sm := ToMap(src); sm != nil {
-			item.MediaSources = append(item.MediaSources, mediaSourceFrom(sm))
+			ms, hasVideo := mediaSourceFrom(sm, item.Type)
+			hasVideoSource = hasVideoSource || hasVideo
+			item.MediaSources = append(item.MediaSources, ms)
 		}
 	}
 
 	item.Artists = ToStringSlice(m["Artists"])
 	item.Album = GetString(m, "Album")
 	item.Status = GetString(m, "Status")
-	item.HasSubtitles = GetBool(m, "HasSubtitles")
-	item.HasLyrics = GetBool(m, "HasLyrics")
+	if hasSubs := GetBool(m, "HasSubtitles"); hasSubs || hasVideoSource || isDetailedVideoType(item.Type) {
+		item.HasSubtitles = BoolPtr(hasSubs)
+	}
+	if hasLyrics := GetBool(m, "HasLyrics"); hasLyrics || item.Type == "Audio" {
+		item.HasLyrics = BoolPtr(hasLyrics)
+	}
 	if cc := GetInt(m, "ChildCount"); cc > 0 {
 		item.ChildCount = cc
 	}
@@ -223,9 +233,46 @@ func DetailedItemFrom(m map[string]any) DetailedItemOutput {
 	return item
 }
 
+func isDetailedVideoType(itemType string) bool {
+	switch itemType {
+	case "Movie", "Episode", "MusicVideo", "Video":
+		return true
+	default:
+		return false
+	}
+}
+
+func isStillImageVideoCodec(codec string) bool {
+	switch strings.ToLower(strings.TrimSpace(codec)) {
+	case "mjpeg", "png", "bmp", "gif", "webp", "tiff", "jpeg", "jpg":
+		return true
+	default:
+		return false
+	}
+}
+
+func applyVideoStream(source *MediaSourceInfo, stm map[string]any) {
+	source.VideoCodec = GetString(stm, "Codec")
+	w, h := GetInt(stm, "Width"), GetInt(stm, "Height")
+	if w > 0 && h > 0 {
+		source.Resolution = fmt.Sprintf("%dx%d", w, h)
+	}
+	source.VideoProfile = GetString(stm, "Profile")
+	if bitDepth := GetInt(stm, "BitDepth"); bitDepth > 0 {
+		source.VideoBitDepth = bitDepth
+	}
+	source.VideoRange = GetString(stm, "VideoRange")
+	if rangeType := GetString(stm, "VideoRangeType"); rangeType != "Unknown" {
+		source.VideoRangeType = rangeType
+	}
+}
+
 // mediaSourceFrom is a raw media source with its video, audio, and subtitle
-// streams. Bitrate is in kbps and size in megabytes, both base 10.
-func mediaSourceFrom(sm map[string]any) MediaSourceInfo {
+// streams. Bitrate is in kbps and size in megabytes, both base 10. Video
+// sources serialize an empty subtitle_streams slice as [] so "no subtitle
+// tracks" is stated explicitly, while embedded cover-art image streams on
+// Audio items (and attached cover art ahead of a real video stream) are skipped.
+func mediaSourceFrom(sm map[string]any, itemType string) (MediaSourceInfo, bool) {
 	source := MediaSourceInfo{
 		Container: GetString(sm, "Container"),
 		Path:      GetString(sm, "Path"),
@@ -236,7 +283,8 @@ func mediaSourceFrom(sm map[string]any) MediaSourceInfo {
 	if sz := GetInt64(sm, "Size"); sz > 0 {
 		source.SizeMB = sz / BytesPerMB
 	}
-	seenVideo := false
+	var primaryVideo, fallbackImageVideo map[string]any
+	var subs []SubtitleStreamInfo
 	for _, st := range ToSlice(sm["MediaStreams"]) {
 		stm := ToMap(st)
 		if stm == nil {
@@ -244,21 +292,14 @@ func mediaSourceFrom(sm map[string]any) MediaSourceInfo {
 		}
 		switch GetString(stm, "Type") {
 		case "Video":
-			if seenVideo {
+			if isStillImageVideoCodec(GetString(stm, "Codec")) {
+				if fallbackImageVideo == nil && !strings.EqualFold(itemType, "Audio") {
+					fallbackImageVideo = stm
+				}
 				continue
 			}
-			seenVideo = true
-			source.VideoCodec = GetString(stm, "Codec")
-			if w := GetInt(stm, "Width"); w > 0 {
-				source.Resolution = fmt.Sprintf("%dx%d", w, GetInt(stm, "Height"))
-			}
-			source.VideoProfile = GetString(stm, "Profile")
-			if bitDepth := GetInt(stm, "BitDepth"); bitDepth > 0 {
-				source.VideoBitDepth = bitDepth
-			}
-			source.VideoRange = GetString(stm, "VideoRange")
-			if rangeType := GetString(stm, "VideoRangeType"); rangeType != "Unknown" {
-				source.VideoRangeType = rangeType
+			if primaryVideo == nil {
+				primaryVideo = stm
 			}
 		case "Audio":
 			audio := AudioStreamInfo{
@@ -273,7 +314,7 @@ func mediaSourceFrom(sm map[string]any) MediaSourceInfo {
 			}
 			source.AudioStreams = append(source.AudioStreams, audio)
 		case "Subtitle":
-			source.SubtitleStreams = append(source.SubtitleStreams, SubtitleStreamInfo{
+			subs = append(subs, SubtitleStreamInfo{
 				Index:        GetInt(stm, "Index"),
 				Codec:        GetString(stm, "Codec"),
 				Language:     GetString(stm, "Language"),
@@ -284,7 +325,19 @@ func mediaSourceFrom(sm map[string]any) MediaSourceInfo {
 			})
 		}
 	}
-	return source
+	chosenVideo := primaryVideo
+	if chosenVideo == nil {
+		chosenVideo = fallbackImageVideo
+	}
+	seenVideo := chosenVideo != nil
+	if seenVideo {
+		applyVideoStream(&source, chosenVideo)
+	}
+	if seenVideo || len(subs) > 0 {
+		subs = nonNil(subs)
+		source.SubtitleStreams = &subs
+	}
+	return source, seenVideo
 }
 
 // SessionFrom is a raw Jellyfin session with its status: playing when it is
@@ -294,7 +347,9 @@ func SessionFrom(s map[string]any) SessionInfo {
 		SessionID:    GetString(s, "Id"),
 		User:         GetString(s, "UserName"),
 		Client:       GetString(s, "Client"),
+		AppVersion:   GetString(s, "ApplicationVersion"),
 		DeviceName:   GetString(s, "DeviceName"),
+		RemoteIP:     GetString(s, "RemoteEndPoint"),
 		LastActivity: LocalDateTime(GetString(s, "LastActivityDate")),
 		Status:       "connected",
 
@@ -476,9 +531,9 @@ func clockTime(ticks int64) string {
 }
 
 // nonNil returns an empty slice in place of nil, so the field serializes as [].
-func nonNil(s []string) []string {
+func nonNil[T any](s []T) []T {
 	if s == nil {
-		return []string{}
+		return []T{}
 	}
 	return s
 }

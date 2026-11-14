@@ -23,18 +23,36 @@ func RegisterPlaybackTools(server *mcp.Server, client jf.Client, enabled func(st
 			InputSchema: jf.WithEnums[jf.SessionsInput](map[string][]any{
 				"action": {"list", "resume"},
 			}),
-			Description: "View active playback sessions and resumable items. Use action 'list' to see all connected clients, what they're playing, " +
-				"whether each stream plays directly, remuxes, or transcodes (with output codecs, bitrate, and transcode reasons), " +
-				"and their session IDs (needed for jellyfin_playback_control and jellyfin_play). " +
-				"Use action 'resume' to see items with in-progress playback that can be continued. " +
-				"Session IDs change when clients reconnect, so always list sessions before sending playback commands.",
+			OutputSchema: jf.SchemaFor[jf.SessionsOutput](),
+			Description: "List active client sessions (playback status, direct/remux/transcode details, and session IDs for jellyfin_playback) or resumable in-progress items. " +
+				"Session IDs change on reconnect, so list sessions before sending playback commands.",
 			Annotations: AnnotReadOnly,
 		}, func(ctx context.Context, req *mcp.CallToolRequest, args jf.SessionsInput) (*mcp.CallToolResult, *jf.SessionsOutput, error) {
 			switch args.Action {
 			case "list":
+				targetUser := strings.TrimSpace(args.UserID)
+				var resolvedUID string
+				if targetUser != "" {
+					uid, err := jf.ResolveUserID(ctx, client, targetUser)
+					if err != nil {
+						return jf.ResolveErrResult(err), nil, nil
+					}
+					resolvedUID = uid
+				}
 				var sessions []map[string]any
 				if err := client.Get(ctx, "/Sessions", nil, &sessions); err != nil {
 					return jf.ErrResult("Jellyfin API error: %v", err), nil, nil
+				}
+				if targetUser != "" {
+					normUID := jf.NormalizeID(resolvedUID)
+					filtered := make([]map[string]any, 0, len(sessions))
+					for _, s := range sessions {
+						if (normUID != "" && jf.NormalizeID(jf.GetString(s, "UserId")) == normUID) ||
+							strings.EqualFold(jf.GetString(s, "UserName"), targetUser) {
+							filtered = append(filtered, s)
+						}
+					}
+					sessions = filtered
 				}
 				// Sessions that are playing come first.
 				infos := jf.SessionsFrom(sessions)
@@ -44,11 +62,11 @@ func RegisterPlaybackTools(server *mcp.Server, client jf.Client, enabled func(st
 				return nil, &jf.SessionsOutput{Sessions: &infos}, nil
 
 			case "resume":
-				userID, err := client.GetUserID(ctx)
+				userID, err := jf.EffectiveUserID(ctx, client, args.UserID)
 				if err != nil {
-					return jf.ErrResult("Jellyfin error: %v", err), nil, nil
+					return jf.ResolveErrResult(err), nil, nil
 				}
-				maxItems := jf.ClampInt(args.Limit, 100, jf.MaxLimitCap)
+				maxItems := jf.ClampInt(args.Limit, 25, jf.MaxLimitCap)
 				// /UserItems/Resume lists what the user is partway through,
 				// most recently played first. It leaves out what a session is
 				// playing now, and on Jellyfin 12 it lists the version of a
@@ -70,35 +88,58 @@ func RegisterPlaybackTools(server *mcp.Server, client jf.Client, enabled func(st
 		})
 	}
 
-	// --- jellyfin_playback_control ---
-	if enabled("jellyfin_playback_control", AnnotWriteOp) {
+	// --- jellyfin_playback ---
+	if enabled("jellyfin_playback", AnnotWriteCreate) {
 		mcp.AddTool(server, &mcp.Tool{
-			Name:  "jellyfin_playback_control",
-			Title: "Playback Control",
-			InputSchema: jf.WithEnums[jf.PlaybackControlInput](map[string][]any{
-				"command": {"Pause", "Unpause", "Stop", "NextTrack", "PreviousTrack", "Seek", "Mute", "Unmute", "ToggleMute", "SetVolume", "SendMessage", "GoHome", "GoToSettings", "ChannelUp", "ChannelDown", "DisplayContent"},
+			Name:  "jellyfin_playback",
+			Title: "Playback & Remote Control",
+			InputSchema: jf.WithEnums[jf.PlaybackInput](map[string][]any{
+				"action": {"PlayNow", "PlayNext", "PlayLast", "Pause", "Unpause", "Stop", "NextTrack", "PreviousTrack", "Seek", "Mute", "Unmute", "ToggleMute", "SetVolume", "SendMessage", "GoHome", "GoToSettings", "ChannelUp", "ChannelDown", "DisplayContent"},
 			}),
-			Description: "Send playback commands to an active client session. Supports Pause, Unpause, Stop, NextTrack, PreviousTrack, Seek, " +
-				"Mute, Unmute, ToggleMute, SetVolume, and SendMessage. " +
-				"The session_id must come from jellyfin_sessions (list action). For Seek, provide seek_position_ticks (10,000,000 ticks = 1 second). " +
-				"To convert: multiply seconds by 10,000,000 to get ticks. The position_ticks field from jellyfin_sessions provides the raw value directly for seek operations. " +
-				"For SetVolume, provide volume (0-100). For SendMessage, provide message text. " +
-				"Also supports GoHome, GoToSettings, ChannelUp, ChannelDown (client navigation), and DisplayContent (navigate the client to an item; requires item_id). " +
-				"The session must be actively playing for transport commands to work.",
+			Description: "Start/queue playback or send transport, volume, message, and UI navigation commands to a controllable client session (get session_id from jellyfin_sessions list).",
 			Annotations: AnnotWriteCreate,
-		}, func(ctx context.Context, req *mcp.CallToolRequest, args jf.PlaybackControlInput) (*mcp.CallToolResult, any, error) {
-			sessionID := jf.SanitizeID(args.SessionID)
-			if result := controllableSession(ctx, client, args.SessionID); result != nil {
-				return result, nil, nil
+		}, func(ctx context.Context, req *mcp.CallToolRequest, args jf.PlaybackInput) (*mcp.CallToolResult, any, error) {
+			switch args.Action {
+			case "PlayNow", "PlayNext", "PlayLast":
+				ids := jf.SplitIDs(args.ItemIDs)
+				if len(ids) == 0 && args.ItemID != "" {
+					ids = jf.SplitIDs([]string{args.ItemID})
+				}
+				if len(ids) == 0 {
+					return jf.ErrResult("item_ids is required. Provide at least one item ID to play."), nil, nil
+				}
+				sessionID, errRes := controllableSession(ctx, client, args.SessionID)
+				if errRes != nil {
+					return errRes, nil, nil
+				}
+				params := url.Values{
+					"PlayCommand": {args.Action},
+				}
+				for _, itemID := range ids {
+					params.Add("ItemIds", itemID)
+				}
+				if args.StartIndex != nil {
+					params.Set("StartIndex", fmt.Sprintf("%d", *args.StartIndex))
+				}
+				endpoint := fmt.Sprintf("/Sessions/%s/Playing", sessionID)
+				if err := client.PostNoContent(ctx, endpoint, params, nil); err != nil {
+					return jf.ErrResult("Failed to start playback: %v. Verify the session_id is valid using jellyfin_sessions.", err), nil, nil
+				}
+				return jf.TextResult(fmt.Sprintf("Playback started: %d items queued with command '%s'.", len(ids), args.Action)), nil, nil
 			}
 
-			switch args.Command {
+			sessionID, errRes := controllableSession(ctx, client, args.SessionID)
+			if errRes != nil {
+				return errRes, nil, nil
+			}
+
+			switch args.Action {
 			case "Pause", "Unpause", "Stop", "NextTrack", "PreviousTrack":
-				endpoint := fmt.Sprintf("/Sessions/%s/Playing/%s", sessionID, args.Command)
+				endpoint := fmt.Sprintf("/Sessions/%s/Playing/%s", sessionID, args.Action)
 				if err := client.PostNoContent(ctx, endpoint, nil, nil); err != nil {
 					return jf.ErrResult("Failed to send command: %v. Verify the session_id is valid using jellyfin_sessions.", err), nil, nil
 				}
-				return jf.TextResult(fmt.Sprintf("Command '%s' sent to session.", args.Command)), nil, nil
+				return jf.TextResult(fmt.Sprintf("Command '%s' sent to session.", args.Action)), nil, nil
 
 			case "Seek":
 				if args.SeekTicks == nil {
@@ -112,11 +153,11 @@ func RegisterPlaybackTools(server *mcp.Server, client jf.Client, enabled func(st
 				return jf.TextResult(fmt.Sprintf("Seeked to position %d ticks.", *args.SeekTicks)), nil, nil
 
 			case "Mute", "Unmute", "ToggleMute":
-				endpoint := fmt.Sprintf("/Sessions/%s/System/%s", sessionID, args.Command)
+				endpoint := fmt.Sprintf("/Sessions/%s/System/%s", sessionID, args.Action)
 				if err := client.PostNoContent(ctx, endpoint, nil, nil); err != nil {
 					return jf.ErrResult("Failed to send command: %v", err), nil, nil
 				}
-				return jf.TextResult(fmt.Sprintf("Command '%s' sent to session.", args.Command)), nil, nil
+				return jf.TextResult(fmt.Sprintf("Command '%s' sent to session.", args.Action)), nil, nil
 
 			case "SetVolume":
 				if args.Volume == nil {
@@ -149,14 +190,20 @@ func RegisterPlaybackTools(server *mcp.Server, client jf.Client, enabled func(st
 				return jf.TextResult("Message sent to session."), nil, nil
 
 			case "GoHome", "GoToSettings", "ChannelUp", "ChannelDown":
-				endpoint := fmt.Sprintf("/Sessions/%s/System/%s", sessionID, args.Command)
+				endpoint := fmt.Sprintf("/Sessions/%s/System/%s", sessionID, args.Action)
 				if err := client.PostNoContent(ctx, endpoint, nil, nil); err != nil {
 					return jf.ErrResult("Failed to send command: %v", err), nil, nil
 				}
-				return jf.TextResult(fmt.Sprintf("Command '%s' sent to session.", args.Command)), nil, nil
+				return jf.TextResult(fmt.Sprintf("Command '%s' sent to session.", args.Action)), nil, nil
 
 			case "DisplayContent":
-				if args.ItemID == "" {
+				targetItem := args.ItemID
+				if targetItem == "" {
+					if ids := jf.SplitIDs(args.ItemIDs); len(ids) == 1 {
+						targetItem = ids[0]
+					}
+				}
+				if targetItem == "" {
 					return jf.ErrResult("item_id is required for DisplayContent. Use jellyfin_search to find item IDs."), nil, nil
 				}
 				// Fetch item to get required type and name for the Viewing endpoint
@@ -165,7 +212,7 @@ func RegisterPlaybackTools(server *mcp.Server, client jf.Client, enabled func(st
 					return jf.ErrResult("Jellyfin error: %v", err), nil, nil
 				}
 				var item map[string]any
-				itemEndpoint := fmt.Sprintf("/Items/%s", jf.SanitizeID(args.ItemID))
+				itemEndpoint := fmt.Sprintf("/Items/%s", jf.SanitizeID(targetItem))
 				itemParams := url.Values{"UserId": {userID}}
 				if err := client.Get(ctx, itemEndpoint, itemParams, &item); err != nil {
 					return jf.ErrResultWithHint("Use jellyfin_search to find valid item IDs.", "Failed to look up item: %v", err), nil, nil
@@ -173,7 +220,7 @@ func RegisterPlaybackTools(server *mcp.Server, client jf.Client, enabled func(st
 				endpoint := fmt.Sprintf("/Sessions/%s/Viewing", sessionID)
 				params := url.Values{
 					"itemType": {jf.GetString(item, "Type")},
-					"itemId":   {args.ItemID},
+					"itemId":   {targetItem},
 					"itemName": {jf.GetString(item, "Name")},
 				}
 				if err := client.PostNoContent(ctx, endpoint, params, nil); err != nil {
@@ -182,77 +229,80 @@ func RegisterPlaybackTools(server *mcp.Server, client jf.Client, enabled func(st
 				return jf.TextResult(fmt.Sprintf("Client navigated to '%s'.", jf.GetString(item, "Name"))), nil, nil
 
 			default:
-				return jf.ErrResult("Invalid command '%s'. Valid commands: Pause, Unpause, Stop, NextTrack, PreviousTrack, Seek, Mute, Unmute, ToggleMute, SetVolume, SendMessage, GoHome, GoToSettings, ChannelUp, ChannelDown, DisplayContent", args.Command), nil, nil
+				return jf.ErrResult("Invalid action '%s'. Valid actions: PlayNow, PlayNext, PlayLast, Pause, Unpause, Stop, NextTrack, PreviousTrack, Seek, Mute, Unmute, ToggleMute, SetVolume, SendMessage, GoHome, GoToSettings, ChannelUp, ChannelDown, DisplayContent", args.Action), nil, nil
 			}
-		})
-	}
-
-	// --- jellyfin_play ---
-	if enabled("jellyfin_play", AnnotWriteOp) {
-		mcp.AddTool(server, &mcp.Tool{
-			Name:  "jellyfin_play",
-			Title: "Play Media",
-			InputSchema: jf.WithEnums[jf.PlayInput](map[string][]any{
-				"play_command": {"PlayNow", "PlayNext", "PlayLast"},
-			}),
-			Description: "Start playback of items on a client session. Sends a list of item IDs to play on the specified session. " +
-				"Use play_command 'PlayNow' (default) to replace the current queue and start playing, 'PlayNext' to insert after the current item, " +
-				"or 'PlayLast' to append to the end of the queue. Use start_index to begin from a specific item in the list. " +
-				"The session_id must come from jellyfin_sessions (list action). Item IDs come from search, browse, or playlist results.",
-			Annotations: AnnotWriteCreate,
-		}, func(ctx context.Context, req *mcp.CallToolRequest, args jf.PlayInput) (*mcp.CallToolResult, any, error) {
-			args.ItemIDs = jf.SplitIDs(args.ItemIDs)
-			if len(args.ItemIDs) == 0 {
-				return jf.ErrResult("item_ids is required. Provide at least one item ID to play."), nil, nil
-			}
-
-			if result := controllableSession(ctx, client, args.SessionID); result != nil {
-				return result, nil, nil
-			}
-
-			playCmd := args.PlayCommand
-			if playCmd == "" {
-				playCmd = "PlayNow"
-			}
-
-			params := url.Values{
-				"PlayCommand": {playCmd},
-			}
-			for _, itemID := range args.ItemIDs {
-				params.Add("ItemIds", itemID)
-			}
-			if args.StartIndex != nil {
-				params.Set("StartIndex", fmt.Sprintf("%d", *args.StartIndex))
-			}
-			endpoint := fmt.Sprintf("/Sessions/%s/Playing", jf.SanitizeID(args.SessionID))
-
-			if err := client.PostNoContent(ctx, endpoint, params, nil); err != nil {
-				return jf.ErrResult("Failed to start playback: %v. Verify the session_id is valid using jellyfin_sessions.", err), nil, nil
-			}
-			return jf.TextResult(fmt.Sprintf("Playback started: %d items queued with command '%s'.", len(args.ItemIDs), playCmd)), nil, nil
 		})
 	}
 }
 
-// controllableSession returns an error result when no active session has the
-// ID, or when the session's client does not accept remote control, so that a
-// command is not sent to a client that silently ignores it.
-func controllableSession(ctx context.Context, client jf.Client, sessionID string) *mcp.CallToolResult {
-	if sessionID == "" {
-		return jf.ErrResult("session_id is required. Use jellyfin_sessions list to find active sessions.")
+// controllableSession resolves sessionID (by exact session ID or unambiguous
+// DeviceName) and returns an error result when no active session matches or
+// when the target client does not accept remote control.
+func controllableSession(ctx context.Context, client jf.Client, sessionID string) (string, *mcp.CallToolResult) {
+	trimmed := strings.TrimSpace(sessionID)
+	if trimmed == "" {
+		return "", jf.ErrResult("session_id is required. Use jellyfin_sessions list to find active sessions.")
 	}
 	var sessions []map[string]any
 	if err := client.Get(ctx, "/Sessions", nil, &sessions); err != nil {
-		return jf.ErrResult("Jellyfin API error: %v", err)
+		return "", jf.ErrResult("Jellyfin API error: %v", err)
 	}
+	normTarget := jf.NormalizeID(trimmed)
 	for _, s := range sessions {
-		if jf.NormalizeID(jf.GetString(s, "Id")) != jf.NormalizeID(sessionID) {
+		id := jf.GetString(s, "Id")
+		if id == "" || (id != trimmed && jf.NormalizeID(id) != normTarget) {
 			continue
 		}
 		if !jf.GetBool(jf.ToMap(s["Capabilities"]), "SupportsMediaControl") {
-			return jf.ErrResult("Session '%s' (%s) does not accept remote control, so nothing was sent. Use jellyfin_sessions list and pick a session whose supports_media_control is true.", jf.GetString(s, "DeviceName"), jf.GetString(s, "Client"))
+			return "", jf.ErrResult("Session '%s' (%s) does not accept remote control, so nothing was sent. Use jellyfin_sessions list and pick a session whose supports_media_control is true.", jf.GetString(s, "DeviceName"), jf.GetString(s, "Client"))
 		}
-		return nil
+		return jf.SanitizeID(id), nil
 	}
-	return jf.ErrResult("No active session has ID '%s'. Use jellyfin_sessions list to find active sessions.", sessionID)
+
+	var exact, fold []map[string]any
+	var controllableDevices []string
+	for _, s := range sessions {
+		id := jf.GetString(s, "Id")
+		dev := jf.GetString(s, "DeviceName")
+		if id == "" || dev == "" {
+			continue
+		}
+		if jf.GetBool(jf.ToMap(s["Capabilities"]), "SupportsMediaControl") && !slices.Contains(controllableDevices, dev) {
+			controllableDevices = append(controllableDevices, dev)
+		}
+		if dev == trimmed {
+			exact = append(exact, s)
+		}
+		if strings.EqualFold(dev, trimmed) {
+			fold = append(fold, s)
+		}
+	}
+	matches := exact
+	if len(matches) == 0 {
+		matches = fold
+	}
+	if len(matches) == 1 {
+		s := matches[0]
+		if !jf.GetBool(jf.ToMap(s["Capabilities"]), "SupportsMediaControl") {
+			return "", jf.ErrResult("Session '%s' (%s) does not accept remote control, so nothing was sent. Use jellyfin_sessions list and pick a session whose supports_media_control is true.", jf.GetString(s, "DeviceName"), jf.GetString(s, "Client"))
+		}
+		return jf.SanitizeID(jf.GetString(s, "Id")), nil
+	}
+	if len(matches) > 1 {
+		var ctrl []map[string]any
+		for _, s := range matches {
+			if jf.GetBool(jf.ToMap(s["Capabilities"]), "SupportsMediaControl") {
+				ctrl = append(ctrl, s)
+			}
+		}
+		if len(ctrl) == 1 {
+			return jf.SanitizeID(jf.GetString(ctrl[0], "Id")), nil
+		}
+		return "", jf.ErrResult("Multiple active sessions match device '%s'. Use jellyfin_sessions list and pass the exact session_id.", trimmed)
+	}
+
+	if len(controllableDevices) > 0 {
+		return "", jf.ErrResult("No active session has ID '%s' (controllable devices: %s). Use jellyfin_sessions list to find active sessions.", trimmed, strings.Join(controllableDevices, ", "))
+	}
+	return "", jf.ErrResult("No active session has ID '%s'. Use jellyfin_sessions list to find active sessions.", trimmed)
 }

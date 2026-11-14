@@ -111,6 +111,10 @@ type resourceWatch struct {
 // The first poll after the group becomes watched sets the baseline and
 // notifies nothing.
 func (w *resourceWatch) poll(ctx context.Context, server *mcp.Server, tracker *subscriptionTracker) {
+	w.pollServers(ctx, []*mcp.Server{server}, tracker)
+}
+
+func (w *resourceWatch) pollServers(ctx context.Context, servers []*mcp.Server, tracker *subscriptionTracker) {
 	if !tracker.watched(w.uris...) {
 		w.seeded = false
 		return
@@ -127,8 +131,10 @@ func (w *resourceWatch) poll(ctx context.Context, server *mcp.Server, tracker *s
 		return
 	}
 	for _, uri := range w.uris {
-		if err := server.ResourceUpdated(ctx, &mcp.ResourceUpdatedNotificationParams{URI: uri}); err != nil {
-			log.Printf("ResourceUpdated(%s): %v", uri, err)
+		for _, server := range servers {
+			if err := server.ResourceUpdated(ctx, &mcp.ResourceUpdatedNotificationParams{URI: uri}); err != nil {
+				log.Printf("ResourceUpdated(%s): %v", uri, err)
+			}
 		}
 	}
 }
@@ -186,6 +192,14 @@ const (
 // startResourcePoller polls the sessions group every sessionInterval and the
 // content groups every contentInterval, until ctx ends.
 func startResourcePoller(ctx context.Context, server *mcp.Server, client jf.Client, tracker *subscriptionTracker, sessionInterval, contentInterval time.Duration) {
+	startResourcePollerFn(ctx, func() []*mcp.Server { return []*mcp.Server{server} }, client, tracker, sessionInterval, contentInterval)
+}
+
+func startPoolResourcePoller(ctx context.Context, pool *serverPool, client jf.Client, tracker *subscriptionTracker, sessionInterval, contentInterval time.Duration) {
+	startResourcePollerFn(ctx, pool.allServers, client, tracker, sessionInterval, contentInterval)
+}
+
+func startResourcePollerFn(ctx context.Context, getServers func() []*mcp.Server, client jf.Client, tracker *subscriptionTracker, sessionInterval, contentInterval time.Duration) {
 	watches := newResourceWatches(client)
 
 	go func() {
@@ -198,10 +212,11 @@ func startResourcePoller(ctx context.Context, server *mcp.Server, client jf.Clie
 			case <-ctx.Done():
 				return
 			case <-sessionTicker.C:
-				watches.sessions.poll(ctx, server, tracker)
+				watches.sessions.pollServers(ctx, getServers(), tracker)
 			case <-contentTicker.C:
-				watches.latest.poll(ctx, server, tracker)
-				watches.played.poll(ctx, server, tracker)
+				servers := getServers()
+				watches.latest.pollServers(ctx, servers, tracker)
+				watches.played.pollServers(ctx, servers, tracker)
 			}
 		}
 	}()

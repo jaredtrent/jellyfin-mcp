@@ -24,17 +24,21 @@ func RegisterAdminSystemTools(server *mcp.Server, client jf.Client, enabled func
 			Name:  "jellyfin_system_info",
 			Title: "System Info",
 			InputSchema: jf.WithEnums[jf.SystemInfoInput](map[string][]any{
-				"action": {"whoami", "info", "storage", "activity_log", "ping", "logs", "log_file", "playback_history", "health_check"},
+				"action": {"whoami", "info", "storage", "activity_log", "ping", "logs", "log_file", "health_check"},
 			}),
-			Description: "Get server information and status. Actions cover user identity (whoami), server info, storage, activity logs, ping, log files, playback history, and a one-call health_check." +
-				"\n\nAction notes:" +
-				"\n- activity_log: Shows activity events (logins and failed logins, playback start/stop, session activity, task and plugin results), newest first; this is not the server's log. Filter with type, severity, item_id, user_id, min_date, and max_date; sort with sort_by and sort_order. For the server's own errors and warnings, use the log_file action instead." +
-				"\n- playback_history: Returns items with play counts, last-played dates, and an actual_playback flag (true = verified playback session in activity log, false = manually marked as watched or playback event expired from log). When the user asks 'what did I watch/last watch', use default verified_only=true. When they ask 'what's marked as watched', set verified_only=false to include manually marked items." +
-				"\n- logs: Lists available log files. Tip: most server logs are named log_*.log, and FFmpeg transcode logs are named FFmpeg.*.log." +
-				"\n- log_file: Reads a server log as entries, each with its exception message and the first frames of its stack trace, and returns the newest that match. Filter with severity, min_date and max_date, and contains. " +
-				fmt.Sprintf("A result holds at most %d entries (limit, default %d) and about %d characters; the result says how to reach the earlier entries it leaves out.", jf.LogFileMaxEntries, jf.LogFileDefaultEntries, jf.LogFileMaxChars),
+			Description: "Inspect server identity, health, storage, activity events, and server/FFmpeg logs. " +
+				"Use activity_log for auth/session/playback/task events, and logs + log_file for server or FFmpeg error logs " +
+				fmt.Sprintf("(up to %d entries and ~%d chars per call).", jf.LogFileMaxEntries, jf.LogFileMaxChars),
 			Annotations: AnnotReadOnly,
 		}, func(ctx context.Context, req *mcp.CallToolRequest, args jf.SystemInfoInput) (*mcp.CallToolResult, any, error) {
+			if strings.TrimSpace(args.UserID) != "" && args.Action != "activity_log" {
+				if args.Action == "whoami" {
+					return jf.ErrResult("user_id is not supported for whoami, which always reports the server's configured user (use jellyfin_users action=get with user_id to inspect another user)."), nil, nil
+				}
+				if slices.Contains([]string{"info", "storage", "ping", "logs", "log_file", "health_check"}, args.Action) {
+					return jf.ErrResult("user_id is only supported for activity_log."), nil, nil
+				}
+			}
 			switch args.Action {
 			case "whoami":
 				userID, err := client.GetUserID(ctx)
@@ -181,52 +185,11 @@ func RegisterAdminSystemTools(server *mcp.Server, client jf.Client, enabled func
 			case "log_file":
 				return handleLogFile(ctx, client, args)
 
-			case "playback_history":
-				return handlePlaybackHistory(ctx, client, args)
-
 			case "health_check":
 				return handleHealthCheck(ctx, client)
 
 			default:
-				return jf.ErrResult("Invalid action '%s'. Valid actions: whoami, info, storage, activity_log, ping, logs, log_file, playback_history, health_check", args.Action), nil, nil
-			}
-		})
-	}
-
-	// --- jellyfin_system_control (destructive server operations) ---
-	if enabled("jellyfin_system_control", AnnotDestructive) {
-		mcp.AddTool(server, &mcp.Tool{
-			Name:  "jellyfin_system_control",
-			Title: "Server Control",
-			InputSchema: jf.WithEnums[jf.SystemControlInput](map[string][]any{
-				"action": {"restart", "shutdown"},
-			}),
-			Description: "Restart or shut down the Jellyfin server. These are destructive operations that cannot be undone. " +
-				"Use 'restart' to restart the server (it is unavailable while it restarts). " +
-				"Use 'shutdown' to stop the server completely (must be manually restarted).",
-			Annotations: AnnotDestructive,
-		}, func(ctx context.Context, req *mcp.CallToolRequest, args jf.SystemControlInput) (*mcp.CallToolResult, any, error) {
-			switch args.Action {
-			case "restart":
-				if result := jf.DestructiveGate(ctx, req, args.Confirm, "Restart the Jellyfin server? It is unavailable while it restarts, and playback stops."); result != nil {
-					return result, nil, nil
-				}
-				if err := client.PostNoContent(ctx, "/System/Restart", nil, nil); err != nil {
-					return jf.ErrResult("Failed to restart: %v", err), nil, nil
-				}
-				return jf.TextResult("Server restart started. The server is unavailable until it comes back."), nil, nil
-
-			case "shutdown":
-				if result := jf.DestructiveGate(ctx, req, args.Confirm, "Shut down the Jellyfin server? It stays off until someone starts it again by hand."); result != nil {
-					return result, nil, nil
-				}
-				if err := client.PostNoContent(ctx, "/System/Shutdown", nil, nil); err != nil {
-					return jf.ErrResult("Failed to shutdown: %v", err), nil, nil
-				}
-				return jf.TextResult("Server shutdown started. It stays off until someone starts it again by hand."), nil, nil
-
-			default:
-				return jf.ErrResult("Invalid action '%s'. Valid actions: restart, shutdown", args.Action), nil, nil
+				return jf.ErrResult("Invalid action '%s'. Valid actions: whoami, info, storage, activity_log, ping, logs, log_file, health_check", args.Action), nil, nil
 			}
 		})
 	}
@@ -303,11 +266,19 @@ func isJellyfinID(s string) bool {
 }
 
 func handleActivityLog(ctx context.Context, client jf.Client, args jf.SystemInfoInput) (*mcp.CallToolResult, any, error) {
+	resolvedUserID := args.UserID
+	if resolvedUserID != "" {
+		uid, err := jf.ResolveUserID(ctx, client, resolvedUserID)
+		if err != nil {
+			return jf.ResolveErrResult(err), nil, nil
+		}
+		resolvedUserID = uid
+	}
 	q := jf.ActivityQuery{
 		Type:   args.Type,
 		ItemID: args.ItemID,
-		UserID: args.UserID,
-		Limit:  jf.ClampInt(args.Limit, 200, jf.MaxLimitCap),
+		UserID: resolvedUserID,
+		Limit:  jf.ClampInt(args.Limit, 50, jf.MaxLimitCap),
 	}
 	var filters []string
 	if args.MinDate != "" {
@@ -385,6 +356,9 @@ func handleActivityLog(ctx context.Context, client jf.Client, args jf.SystemInfo
 		if overview := jf.GetString(m, "Overview"); overview != "" {
 			entry["overview"] = jf.Truncate(overview, jf.OverviewMaxLen)
 		}
+		if shortOverview := jf.GetString(m, "ShortOverview"); shortOverview != "" && shortOverview != jf.GetString(m, "Overview") {
+			entry["short_overview"] = jf.Truncate(shortOverview, jf.OverviewMaxLen)
+		}
 		if uid := jf.GetString(m, "UserId"); uid != "" {
 			entry["user_id"] = uid
 		}
@@ -408,82 +382,6 @@ func handleActivityLog(ctx context.Context, client jf.Client, args jf.SystemInfo
 	msg := fmt.Sprintf("%s:\n\n%s", header, jf.FormatJSON(entries))
 	if found.Capped {
 		msg += fmt.Sprintf("\n\nOnly the %d most recent entries were examined, so older matches may be missing. Narrow the dates with min_date and max_date to reach them.", jf.ActivityLogLookback)
-	}
-	return jf.TextResult(msg), nil, nil
-}
-
-// playbackEntry is a played item with what the play state adds: the play
-// count, and whether the activity log verifies a playback.
-type playbackEntry struct {
-	jf.MediaItem
-	PlayCount      int   `json:"play_count,omitempty"`
-	ActualPlayback *bool `json:"actual_playback,omitempty"`
-}
-
-func handlePlaybackHistory(ctx context.Context, client jf.Client, args jf.SystemInfoInput) (*mcp.CallToolResult, any, error) {
-	userID, err := client.GetUserID(ctx)
-	if err != nil {
-		return jf.ErrResult("Jellyfin error: %v", err), nil, nil
-	}
-	maxItems := jf.ClampInt(args.Limit, 500, jf.MaxLimitCap)
-	targetUser := userID
-	if args.UserID != "" {
-		targetUser = args.UserID
-	}
-	params := url.Values{
-		"UserId":    {targetUser},
-		"Recursive": {"true"},
-		"Filters":   {"IsPlayed"},
-		"SortBy":    {"DatePlayed"},
-		"SortOrder": {"Descending"},
-		"Fields":    {"Overview"},
-	}
-	rawItems, total, err := jf.FetchAllPages(ctx, client, "/Items", params, maxItems)
-	if err != nil {
-		return jf.ErrResult("Jellyfin API error: %v", err), nil, nil
-	}
-
-	verifiedOnly := args.VerifiedOnly == nil || *args.VerifiedOnly
-	// Without the activity log, playback can be listed but not verified.
-	playedViaPlayback, verifyErr := jf.PlayedItemIDs(ctx, client, targetUser)
-	if verifyErr != nil && verifiedOnly {
-		return jf.ErrResult("Jellyfin API error: %v. Set verified_only=false to list items marked played without verifying them.", verifyErr), nil, nil
-	}
-
-	entries := make([]playbackEntry, 0, len(rawItems))
-	for _, raw := range rawItems {
-		m := jf.ToMap(raw)
-		entry := playbackEntry{MediaItem: jf.MediaItemFrom(m)}
-		if ud := jf.ToMap(m["UserData"]); ud != nil {
-			if lp := jf.GetString(ud, "LastPlayedDate"); lp != "" {
-				entry.LastPlayed = jf.LocalDateTime(lp)
-			}
-			if pc := jf.GetInt(ud, "PlayCount"); pc > 0 {
-				entry.PlayCount = pc
-			}
-		}
-		actual := playedViaPlayback[jf.NormalizeID(entry.ID)]
-		if verifyErr == nil {
-			entry.ActualPlayback = &actual
-		}
-		if verifiedOnly && !actual {
-			continue
-		}
-		entries = append(entries, entry)
-	}
-	header := fmt.Sprintf("Playback history (%d items", len(entries))
-	if verifiedOnly {
-		header += fmt.Sprintf(", verified_only=true, %d total marked played", total)
-		if total > len(rawItems) {
-			header += fmt.Sprintf(", the %d most recently played checked", len(rawItems))
-		}
-	} else {
-		header += fmt.Sprintf(" of %d total", total)
-	}
-	header += "). played means finished at least once; progress is the position saved by the latest play"
-	msg := fmt.Sprintf("%s:\n\n%s", header, jf.FormatJSON(entries))
-	if verifyErr != nil {
-		msg += fmt.Sprintf("\n\nPlayback could not be verified, so actual_playback is left out: %v", verifyErr)
 	}
 	return jf.TextResult(msg), nil, nil
 }
@@ -765,7 +663,7 @@ func truncateAtWord(s string, max int) string {
 // them.
 func handleLogFile(ctx context.Context, client jf.Client, args jf.SystemInfoInput) (*mcp.CallToolResult, any, error) {
 	if args.Name == "" {
-		return jf.ErrResult("name is required for log_file. Use 'logs' action to list available log files."), nil, nil
+		return jf.ErrResult("name is required for log_file. Call action='logs' first (with log_type='ffmpeg' or 'all' for FFmpeg transcode logs) to get valid log file names."), nil, nil
 	}
 	severity := strings.ToLower(args.Severity)
 	if severity == "" {

@@ -691,7 +691,7 @@ func TestServerMetadataAndCacheHints(t *testing.T) {
 func TestDisableDestructiveRefusesAtTheTool(t *testing.T) {
 	for _, disabled := range []bool{true, false} {
 		cs := connectClient(t, newServer(Config{DisableDestructive: disabled}, fakeClient{}, &subscriptionTracker{}), statelessProtocolVersion, nil)
-		res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: "jellyfin_system_control", Arguments: map[string]any{"action": "restart"}})
+		res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: "jellyfin_server", Arguments: map[string]any{"action": "restart"}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -856,4 +856,385 @@ func jsonInto(v any, dest any) error {
 		return err
 	}
 	return json.Unmarshal(b, dest)
+}
+
+type restartClient struct {
+	fakeClient
+	restarts atomic.Int32
+}
+
+func (r *restartClient) PostNoContent(_ context.Context, endpoint string, _ url.Values, _ any) error {
+	if endpoint == "/System/Restart" {
+		r.restarts.Add(1)
+		return nil
+	}
+	return errors.New("unexpected endpoint " + endpoint)
+}
+
+func TestReadOnlyServerInstructions(t *testing.T) {
+	defaultCS := connectClient(t, newServer(Config{}, fakeClient{}, &subscriptionTracker{}), "2025-11-25", nil)
+	defaultInst := defaultCS.InitializeResult().Instructions
+	if !strings.Contains(defaultInst, "Write safety:") || strings.Contains(defaultInst, "Read-only mode:") {
+		t.Errorf("default instructions = %q, want Write safety without Read-only mode", defaultInst)
+	}
+	if !strings.Contains(defaultInst, "search/browse first; never guess IDs") || strings.Contains(defaultInst, "on the first turn") {
+		t.Errorf("default instructions = %q, want search-before-gated-call guidance without 'on the first turn'", defaultInst)
+	}
+	if !strings.Contains(defaultInst, "jellyfin_playback_stats") {
+		t.Errorf("default instructions = %q, want jellyfin_playback_stats guidance", defaultInst)
+	}
+
+	for _, cfg := range []Config{
+		{ReadOnly: true},
+		{Toolsets: "find-media"},
+		{Toolsets: "monitor-media,monitor-server"},
+	} {
+		roCS := connectClient(t, newServer(cfg, fakeClient{}, &subscriptionTracker{}), "2025-11-25", nil)
+		roInst := roCS.InitializeResult().Instructions
+		if !strings.Contains(roInst, "Read-only mode:") || strings.Contains(roInst, "Write safety:") {
+			t.Errorf("cfg=%+v instructions = %q, want Read-only mode without Write safety", cfg, roInst)
+		}
+	}
+}
+
+func TestNewServerRequiresPreviewBeforeConfirm(t *testing.T) {
+	for _, version := range []string{statelessProtocolVersion, "2025-11-25"} {
+		t.Run(version, func(t *testing.T) {
+			rc := &restartClient{}
+			ts := httptest.NewServer(newHTTPHandler(newServer(Config{}, rc, &subscriptionTracker{})))
+			t.Cleanup(ts.Close)
+
+			cs, err := mcp.NewClient(&mcp.Implementation{Name: "no-elicit", Version: "0.1"}, nil).Connect(
+				t.Context(),
+				&mcp.StreamableClientTransport{Endpoint: ts.URL},
+				&mcp.ClientSessionOptions{ProtocolVersion: version},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = cs.Close() })
+
+			// Premature confirm=true on turn 1 must return CONFIRMATION REQUIRED without restarting.
+			first, err := cs.CallTool(t.Context(), &mcp.CallToolParams{
+				Name:      "jellyfin_server",
+				Arguments: map[string]any{"action": "restart", "confirm": true},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			firstText := first.Content[0].(*mcp.TextContent).Text
+			if !strings.Contains(firstText, "CONFIRMATION REQUIRED") || rc.restarts.Load() != 0 {
+				t.Fatalf("turn 1 result = %q (restarts=%d), want CONFIRMATION REQUIRED and 0 restarts", firstText, rc.restarts.Load())
+			}
+
+			// Follow-up confirm=true on turn 2 after seeing the preview executes the restart.
+			second, err := cs.CallTool(t.Context(), &mcp.CallToolParams{
+				Name:      "jellyfin_server",
+				Arguments: map[string]any{"action": "restart", "confirm": true},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			secondText := second.Content[0].(*mcp.TextContent).Text
+			if strings.Contains(secondText, "CONFIRMATION REQUIRED") || rc.restarts.Load() != 1 {
+				t.Fatalf("turn 2 result = %q (restarts=%d), want restart executed once", secondText, rc.restarts.Load())
+			}
+		})
+	}
+}
+
+func connectPoolClient(t *testing.T, endpoint, version string, opts *mcp.ClientOptions) *mcp.ClientSession {
+	t.Helper()
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "pool-client", Version: "0.1"}, opts).Connect(
+		t.Context(),
+		&mcp.StreamableClientTransport{Endpoint: endpoint},
+		&mcp.ClientSessionOptions{ProtocolVersion: version},
+	)
+	if err != nil {
+		t.Fatalf("connect(%s, %s): %v", endpoint, version, err)
+	}
+	t.Cleanup(func() { _ = cs.Close() })
+	return cs
+}
+
+func TestHTTPPoolQueryScoping_NarrowingInstructionsAndBothEras(t *testing.T) {
+	pool := newServerPool(Config{}, fakeClient{}, &subscriptionTracker{})
+	ts := httptest.NewServer(newHTTPPoolMux(pool, ""))
+	t.Cleanup(ts.Close)
+
+	cases := []struct {
+		query     string
+		wantCount int
+		wantRO    bool
+	}{
+		{"", 25, false},
+		{"?toolsets=find-media", 14, true},
+		{"?toolsets=monitor-media,monitor-server", 8, true},
+		{"?read_only=true", 23, true},
+		{"?read_only=1", 23, true},
+		{"?read_only=false", 25, false},
+		{"?read_only=0", 25, false},
+		{"?toolsets=control-playback", 2, false},
+		{"?toolsets=control-playback&read_only=true", 1, true},
+	}
+
+	for _, version := range []string{statelessProtocolVersion, "2025-11-25"} {
+		for _, tc := range cases {
+			t.Run(version+tc.query, func(t *testing.T) {
+				cs := connectPoolClient(t, ts.URL+"/mcp"+tc.query, version, nil)
+				inst := cs.InitializeResult().Instructions
+				if tc.wantRO {
+					if !strings.Contains(inst, "Read-only mode:") || strings.Contains(inst, "Write safety:") {
+						t.Errorf("instructions = %q, want Read-only mode", inst)
+					}
+				} else {
+					if !strings.Contains(inst, "Write safety:") || strings.Contains(inst, "Read-only mode:") {
+						t.Errorf("instructions = %q, want Write safety", inst)
+					}
+				}
+
+				list, err := cs.ListTools(t.Context(), nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(list.Tools) != tc.wantCount {
+					t.Errorf("len(Tools) = %d, want %d", len(list.Tools), tc.wantCount)
+				}
+				if tc.wantRO {
+					for _, tl := range list.Tools {
+						if tl.Annotations == nil || !tl.Annotations.ReadOnlyHint || tl.Annotations.DestructiveHint == nil || *tl.Annotations.DestructiveHint {
+							t.Errorf("tool %s in RO query %q has write/destructive annotations: %+v", tl.Name, tc.query, tl.Annotations)
+						}
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestHTTPPoolQueryScoping_StrictNarrowingInvariants(t *testing.T) {
+	// 1. Base ReadOnly=true cannot be widened by ?read_only=false or ?toolsets=admin-server.
+	roPool := newServerPool(Config{ReadOnly: true}, &restartClient{}, &subscriptionTracker{})
+	roTS := httptest.NewServer(newHTTPPoolMux(roPool, ""))
+	t.Cleanup(roTS.Close)
+
+	for _, q := range []string{"?read_only=false", "?toolsets=admin-server&read_only=0"} {
+		cs := connectPoolClient(t, roTS.URL+"/mcp"+q, "2025-11-25", nil)
+		if !strings.Contains(cs.InitializeResult().Instructions, "Read-only mode:") {
+			t.Errorf("base ReadOnly=true + %s lost Read-only mode instructions", q)
+		}
+		res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{
+			Name:      "jellyfin_server",
+			Arguments: map[string]any{"action": "restart"},
+		})
+		if err == nil && (res == nil || !res.IsError) {
+			t.Errorf("base ReadOnly=true + %s allowed restart!", q)
+		}
+	}
+
+	// 2. Base Toolsets="find-media" + ?toolsets=admin-server yields 0 tools.
+	fmPool := newServerPool(Config{Toolsets: "find-media"}, fakeClient{}, &subscriptionTracker{})
+	fmTS := httptest.NewServer(newHTTPPoolMux(fmPool, ""))
+	t.Cleanup(fmTS.Close)
+	csEmpty := connectPoolClient(t, fmTS.URL+"/mcp?toolsets=admin-server", "2025-11-25", nil)
+	emptyTools, err := csEmpty.ListTools(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(emptyTools.Tools) != 0 {
+		t.Errorf("find-media narrowed by admin-server returned %d tools, want 0", len(emptyTools.Tools))
+	}
+
+	// 3. Base Toolsets="manage-media" + ?toolsets=monitor-server or ?read_only=true must NOT unlock browse_drives.
+	mgPool := newServerPool(Config{Toolsets: "manage-media"}, fakeClient{}, &subscriptionTracker{})
+	mgTS := httptest.NewServer(newHTTPPoolMux(mgPool, ""))
+	t.Cleanup(mgTS.Close)
+	for _, q := range []string{"?toolsets=monitor-server", "?read_only=true"} {
+		cs := connectPoolClient(t, mgTS.URL+"/mcp"+q, "2025-11-25", nil)
+		list, listErr := cs.ListTools(t.Context(), nil)
+		if listErr != nil {
+			t.Fatal(listErr)
+		}
+		for _, tl := range list.Tools {
+			if tl.Name == "jellyfin_library_manage" {
+				t.Errorf("base manage-media + %s exposed jellyfin_library_manage (would leak browse_drives)", q)
+			}
+		}
+	}
+
+	// 4. Base Toolsets="admin-server" + ?toolsets=manage-media narrows jellyfin_library_manage to curator tier only.
+	asPool := newServerPool(Config{Toolsets: "admin-server"}, fakeClient{}, &subscriptionTracker{})
+	asTS := httptest.NewServer(newHTTPPoolMux(asPool, ""))
+	t.Cleanup(asTS.Close)
+	csCurate := connectPoolClient(t, asTS.URL+"/mcp?toolsets=manage-media", "2025-11-25", nil)
+	curateTools, err := csCurate.ListTools(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(curateTools.Tools) != 1 || curateTools.Tools[0].Name != "jellyfin_library_manage" {
+		t.Fatalf("admin-server narrowed by manage-media = %v, want only jellyfin_library_manage", curateTools.Tools)
+	}
+	b, _ := json.Marshal(curateTools.Tools[0].InputSchema)
+	var schema struct {
+		Properties map[string]struct {
+			Enum []string `json:"enum"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(b, &schema); err != nil {
+		t.Fatal(err)
+	}
+	wantCurateEnum := []string{"list_folders", "scan", "refresh_item"}
+	if !slices.Equal(schema.Properties["action"].Enum, wantCurateEnum) {
+		t.Errorf("narrowed jellyfin_library_manage action enum = %v, want %v", schema.Properties["action"].Enum, wantCurateEnum)
+	}
+}
+
+func TestHTTPPoolQueryScoping_InvalidParamsReturn400(t *testing.T) {
+	pool := newServerPool(Config{}, fakeClient{}, &subscriptionTracker{})
+	handler := newHTTPPoolMux(pool, "")
+
+	badQueries := []string{
+		"?toolsets=unknown",
+		"?toolsets=find-media,bogus",
+		"?toolsets=",
+		"?toolsets=,,,",
+		"?read_only=maybe",
+		"?read_only=",
+		"?read_only=true&read_only=false",
+		"?read_only=true%2",
+		"?toolsets=find-media%2",
+		"?read_only=true;foo=1",
+		"?toolsets=find-media;extra=1",
+		"?readonly=true",
+		"?read-only=true",
+		"?toolset=find-media",
+		"?toolsets=live-tv&read-only=true",
+		"?foo=bar",
+	}
+
+	for _, version := range []string{"", statelessProtocolVersion} {
+		method := "initialize"
+		body := initializeOfSize(1, 256)
+		if version != "" {
+			method = "server/discover"
+			body = discoverOfSize(1, 320)
+		}
+		for _, q := range badQueries {
+			req := httptest.NewRequest(http.MethodPost, "/mcp"+q, strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Accept", "application/json, text/event-stream")
+			if version != "" {
+				req.Header.Set("MCP-Protocol-Version", version)
+				req.Header.Set("Mcp-Method", method)
+			}
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("version=%q query=%q: status %d, want 400: %s", version, q, rec.Code, rec.Body.String())
+			}
+		}
+	}
+}
+
+func TestHTTPPoolQueryScoping_CacheReuseIsolationSessionCapAndPoller(t *testing.T) {
+	pc := newPollClient()
+	pc.set("/Sessions", `[]`)
+	tracker := &subscriptionTracker{}
+	pool := newServerPool(Config{}, pc, tracker)
+
+	// 1. Equivalent query strings reuse the exact same cached *mcp.Server pointer.
+	r1 := httptest.NewRequest(http.MethodPost, "/mcp?toolsets=find-media,monitor-media", nil)
+	r2 := httptest.NewRequest(http.MethodPost, "/mcp?toolsets=monitor-media,find-media", nil)
+	r3 := httptest.NewRequest(http.MethodPost, "/mcp?toolsets=DISCOVERY,monitor-media", nil)
+	s1 := pool.forRequest(r1)
+	s2 := pool.forRequest(r2)
+	s3 := pool.forRequest(r3)
+	if s1 == nil || s1 != s2 || s1 != s3 {
+		t.Fatalf("expected identical cached *mcp.Server pointers, got %p %p %p", s1, s2, s3)
+	}
+
+	// 2. Cap pool sessions at 2 and verify sessions across distinct profiles share the limit,
+	// and stateful Mcp-Session-Id cannot cross profiles.
+	cappedHandler := limitPoolSessions(newHTTPPoolHandler(pool), pool, 2)
+	ts := httptest.NewServer(cappedHandler)
+	t.Cleanup(ts.Close)
+
+	var updated atomic.Int32
+	csFull := connectPoolClient(t, ts.URL+"/mcp", "2025-11-25", nil)
+	csScoped := connectPoolClient(t, ts.URL+"/mcp?toolsets=find-media", "2025-11-25", &mcp.ClientOptions{
+		ResourceUpdatedHandler: func(_ context.Context, req *mcp.ResourceUpdatedNotificationRequest) {
+			if req.Params.URI == "jellyfin://sessions" {
+				updated.Add(1)
+			}
+		},
+	})
+
+	// 3rd stateful session on yet another profile exceeds limit=2 -> 503 Service Unavailable.
+	req3, _ := http.NewRequest(http.MethodPost, ts.URL+"/mcp?read_only=true", strings.NewReader(initializeOfSize(9, 256)))
+	req3.Header.Set("Content-Type", "application/json")
+	req3.Header.Set("Accept", "application/json, text/event-stream")
+	resp3, err := http.DefaultClient.Do(req3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp3.Body.Close()
+	if resp3.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("3rd session across pool: status %d, want 503", resp3.StatusCode)
+	}
+
+	// Cross-profile Mcp-Session-Id reuse is rejected with 404 Not Found in both directions
+	// (full -> narrowed and narrowed -> full).
+	fullSessionID := csFull.ID()
+	if fullSessionID == "" {
+		t.Fatal("expected non-empty stateful session ID")
+	}
+	crossReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/mcp?read_only=true", strings.NewReader(`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`))
+	crossReq.Header.Set("Content-Type", "application/json")
+	crossReq.Header.Set("Accept", "application/json, text/event-stream")
+	crossReq.Header.Set("Mcp-Session-Id", fullSessionID)
+	crossResp, err := http.DefaultClient.Do(crossReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = crossResp.Body.Close()
+	if crossResp.StatusCode != http.StatusNotFound {
+		t.Errorf("cross-profile session reuse (full -> narrowed): status %d, want 404", crossResp.StatusCode)
+	}
+
+	scopedSessionID := csScoped.ID()
+	if scopedSessionID == "" {
+		t.Fatal("expected non-empty scoped stateful session ID")
+	}
+	escalateReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}}`))
+	escalateReq.Header.Set("Content-Type", "application/json")
+	escalateReq.Header.Set("Accept", "application/json, text/event-stream")
+	escalateReq.Header.Set("Mcp-Session-Id", scopedSessionID)
+	escalateResp, err := http.DefaultClient.Do(escalateReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = escalateResp.Body.Close()
+	if escalateResp.StatusCode != http.StatusNotFound {
+		t.Errorf("cross-profile session reuse (narrowed -> full): status %d, want 404", escalateResp.StatusCode)
+	}
+
+	// 3. startPoolResourcePoller delivers ResourceUpdated to subscribers on narrowed pooled servers.
+	if err := csScoped.Subscribe(t.Context(), &mcp.SubscribeParams{URI: "jellyfin://sessions"}); err != nil {
+		t.Fatal("Subscribe:", err)
+	}
+	pollCtx, pollCancel := context.WithCancel(t.Context())
+	defer pollCancel()
+	startPoolResourcePoller(pollCtx, pool, pc, tracker, 15*time.Millisecond, time.Hour)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for pc.count("/Sessions") == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	pc.set("/Sessions", `[{"Id":"s-1"}]`)
+	for updated.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if updated.Load() == 0 {
+		t.Error("subscriber on /mcp?toolsets=find-media did not receive ResourceUpdated from startPoolResourcePoller")
+	}
 }

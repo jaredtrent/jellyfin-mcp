@@ -343,7 +343,7 @@ func TestPlaylistEdit_DeduplicatePreviewsByDefault(t *testing.T) {
 	if len(p.writes) != 0 {
 		t.Errorf("a dry run sent %v", p.methods())
 	}
-	assertContains(t, text, "Dry run", "2 duplicate entries are removed", `"occurrences": 2`, "the last 3 entries are removed and added back", "the user is asked to confirm")
+	assertContains(t, text, "Dry run", "2 duplicate entries are removed", `"occurrences":2`, "the last 3 entries are removed and added back", "the user is asked to confirm")
 	if strings.Index(text, "remove_every_entry_of") > strings.Index(text, "then_append_in_order") {
 		t.Errorf("the requests must be listed in the order they are sent: %s", text)
 	}
@@ -482,8 +482,8 @@ func TestPlaylistEdit_RemoveItemsCountsEachItemOnce(t *testing.T) {
 	if got, want := p.ids(), []string{"c"}; !slices.Equal(got, want) {
 		t.Errorf("playlist = %v, want %v", got, want)
 	}
-	assertContains(t, text, "Every entry of 2 items is removed (4 entries)", `"entries": 3`, `"entries": 1`)
-	if n := strings.Count(text, `"item_id": "a"`); n != 1 {
+	assertContains(t, text, "Every entry of 2 items is removed (4 entries)", `"entries":3`, `"entries":1`)
+	if n := strings.Count(text, `"item_id":"a"`); n != 1 {
 		t.Errorf("a is reported %d times, want once: %s", n, text)
 	}
 }
@@ -699,7 +699,7 @@ func TestPlaylistEdit_RemovingEveryVisibleEntryWithARatingLimit(t *testing.T) {
 	p.ratingLimit, p.hideWhenEmpty = 13, true
 	args := map[string]any{"action": "remove_items", "item_ids": []string{"a", "b"}}
 	text, _ := callPlaylists(t, p, args)
-	assertContains(t, text, "CONFIRMATION REQUIRED", "The playlist may then disappear for user test-user-id")
+	assertContains(t, text, "CONFIRMATION REQUIRED", "The playlist may then disappear for user 'test-user-id'")
 
 	args["confirm"] = true
 	text, isErr := callPlaylists(t, p, args)
@@ -709,7 +709,7 @@ func TestPlaylistEdit_RemovingEveryVisibleEntryWithARatingLimit(t *testing.T) {
 	if got := p.ids(); len(got) != 0 {
 		t.Errorf("playlist = %v, want every visible entry removed", got)
 	}
-	assertContains(t, text, "the playlist may disappear for them", "can no longer be found as user test-user-id")
+	assertContains(t, text, "the playlist may disappear for them", "can no longer be found as user 'test-user-id'")
 }
 
 func TestPlaylistEdit_ReportsHowToFinishAFailedAppend(t *testing.T) {

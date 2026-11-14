@@ -30,7 +30,7 @@ make check
 main.go                          CLI entry point (cobra)
 internal/jellyfin/               Jellyfin API client, types, output structs, helpers
 internal/server/                 MCP server setup, middleware, subscriptions
-internal/server/tools/           31 tools in 8 toolsets
+internal/server/tools/           25 tools in 8 toolsets
 internal/server/resources/       13 live data resources and the reference guides in guides/
 internal/server/prompts/         19 guided workflows
 npm/                             npm package for linux/x64 distribution
@@ -53,7 +53,7 @@ To serve HTTP instead of stdio:
 ```sh
 set -a; source .env; set +a
 ./build/jellyfin-mcp --http
-# The endpoint is http://127.0.0.1:8080/mcp
+# The endpoint is http://127.0.0.1:8080/mcp (append ?toolsets=find-media or ?read_only=true to narrow a client connection)
 ```
 
 ## Try Your Build in Claude
@@ -95,7 +95,7 @@ Keep a pull request to one feature or fix, so it can be reviewed and reverted on
 1. Choose the file in `internal/server/tools/` for the toolset the tool belongs to.
 2. Write the handler in the pattern of its neighbors: an input struct, the client call, and the result. A typed tool returns a struct from `internal/jellyfin/output_types.go`, which the SDK turns into the tool's output schema and structured content. A text tool returns `jf.TextResult`, and an error returns `jf.ErrResult`.
 3. Register it in the file's `Register*Tools` function with the annotation preset that fits: `AnnotReadOnly`, `AnnotWriteOp`, `AnnotWriteCreate`, or `AnnotDestructive`.
-4. Add the tool's name to `ToolsetMap` in `tools.go`.
+4. Add the tool's name to `ToolsetMap` and `canonicalToolsetAccess` in `tools.go`.
 5. Describe it in `internal/server/tools/README.md` and `npm/jellyfin-mcp/README.md`, and update the tool counts in `README.md`.
 6. Add tests.
 

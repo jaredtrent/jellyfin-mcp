@@ -10,7 +10,7 @@ import (
 const LatestItemsLimit = 20
 
 // FetchLatest returns the most recently added items, newest first, as compact
-// item summaries. parentID, when set, limits them to one library.
+// item summaries for the configured user. parentID, when set, limits them to one library.
 //
 // /Items/Latest is user-scoped: without a user the server answers 404, and an
 // API key carries no user, so the resolved user is always sent.
@@ -19,6 +19,12 @@ func FetchLatest(ctx context.Context, client Client, parentID string, limit int)
 	if err != nil {
 		return nil, err
 	}
+	return FetchLatestForUser(ctx, client, userID, parentID, limit)
+}
+
+// FetchLatestForUser returns the most recently added items visible to userID,
+// newest first, as compact item summaries. parentID, when set, limits them to one library.
+func FetchLatestForUser(ctx context.Context, client Client, userID, parentID string, limit int) ([]MediaItem, error) {
 	params := url.Values{
 		"UserId": {userID},
 		"Limit":  {fmt.Sprintf("%d", limit)},

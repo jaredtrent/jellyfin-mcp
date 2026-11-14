@@ -279,8 +279,12 @@ func CheckPlaylistEdit(ctx context.Context, client Client, userID string, entrie
 		return false, nil
 	}
 	if len(edit.Append) > 0 {
+		uLabel := userID
+		if name := GetString(user, "Name"); name != "" {
+			uLabel = "'" + name + "'"
+		}
 		return false, fmt.Errorf("the edit removes every entry before adding entries back, and user %s has a parental rating limit; Jellyfin %s hides such a user's playlist while all of its remaining entries are above that limit, which would refuse the entries being added back. "+
-			"Set JELLYFIN_USER_ID to a user without a rating limit who can edit the playlist, or make this change in a Jellyfin client", userID, version)
+			"Set JELLYFIN_USER_ID to a user without a rating limit who can edit the playlist, or make this change in a Jellyfin client", uLabel, version)
 	}
 	return true, nil
 }

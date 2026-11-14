@@ -835,7 +835,7 @@ func TestDetailedItemFrom(t *testing.T) {
 			},
 		},
 		{
-			name: "false HasSubtitles and HasLyrics omitted",
+			name: "false HasSubtitles emitted on video while false HasLyrics omitted",
 			input: map[string]any{
 				"Id":           "det13b",
 				"Name":         "No Subs",
@@ -844,9 +844,137 @@ func TestDetailedItemFrom(t *testing.T) {
 				"HasLyrics":    false,
 			},
 			expect: map[string]any{
-				"id":   "det13b",
-				"name": "No Subs",
-				"type": "Movie",
+				"id":            "det13b",
+				"name":          "No Subs",
+				"type":          "Movie",
+				"has_subtitles": false,
+			},
+		},
+		{
+			name: "false HasLyrics emitted on Audio while false HasSubtitles omitted",
+			input: map[string]any{
+				"Id":           "det13c",
+				"Name":         "Instrumental",
+				"Type":         "Audio",
+				"HasSubtitles": false,
+				"HasLyrics":    false,
+			},
+			expect: map[string]any{
+				"id":         "det13c",
+				"name":       "Instrumental",
+				"type":       "Audio",
+				"has_lyrics": false,
+			},
+		},
+		{
+			name: "false HasSubtitles and HasLyrics omitted on non-video non-audio",
+			input: map[string]any{
+				"Id":           "det13d",
+				"Name":         "Series Entry",
+				"Type":         "Series",
+				"HasSubtitles": false,
+				"HasLyrics":    false,
+			},
+			expect: map[string]any{
+				"id":   "det13d",
+				"name": "Series Entry",
+				"type": "Series",
+			},
+		},
+		{
+			name: "video MediaSource without subtitles emits empty subtitle_streams",
+			input: map[string]any{
+				"Id":   "det13e",
+				"Name": "No Subs",
+				"Type": "Movie",
+				"MediaSources": []any{
+					map[string]any{
+						"Container": "mkv",
+						"MediaStreams": []any{
+							map[string]any{"Type": "Video", "Codec": "h264", "Width": float64(1920), "Height": float64(1080)},
+							map[string]any{"Type": "Audio", "Index": float64(1), "Codec": "flac", "Channels": float64(1), "Language": "jpn", "IsDefault": true},
+						},
+					},
+				},
+			},
+			expect: map[string]any{
+				"id":            "det13e",
+				"name":          "No Subs",
+				"type":          "Movie",
+				"has_subtitles": false,
+				"media_sources": []map[string]any{
+					{
+						"container":   "mkv",
+						"video_codec": "h264",
+						"resolution":  "1920x1080",
+						"audio_streams": []map[string]any{
+							{"index": 1, "codec": "flac", "channels": 1, "language": "jpn", "is_default": true},
+						},
+						"subtitle_streams": []any{},
+					},
+				},
+			},
+		},
+		{
+			name: "Audio item with embedded mjpeg cover art ignores pseudo-video stream",
+			input: map[string]any{
+				"Id":   "det13f",
+				"Name": "Synthwave Track",
+				"Type": "Audio",
+				"MediaSources": []any{
+					map[string]any{
+						"Container": "flac",
+						"MediaStreams": []any{
+							map[string]any{"Type": "Audio", "Index": float64(0), "Codec": "flac", "Channels": float64(2), "IsDefault": true},
+							map[string]any{"Type": "Video", "Index": float64(1), "Codec": "mjpeg", "Width": float64(1000), "Height": float64(1000)},
+						},
+					},
+				},
+			},
+			expect: map[string]any{
+				"id":         "det13f",
+				"name":       "Synthwave Track",
+				"type":       "Audio",
+				"has_lyrics": false,
+				"media_sources": []map[string]any{
+					{
+						"container": "flac",
+						"audio_streams": []map[string]any{
+							{"index": 0, "codec": "flac", "channels": 2, "is_default": true},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "Movie with attached mjpeg cover art before real video stream picks real video",
+			input: map[string]any{
+				"Id":   "det13g",
+				"Name": "Cover First",
+				"Type": "Movie",
+				"MediaSources": []any{
+					map[string]any{
+						"Container": "mkv",
+						"MediaStreams": []any{
+							map[string]any{"Type": "Video", "Index": float64(0), "Codec": "mjpeg", "Width": float64(600), "Height": float64(900)},
+							map[string]any{"Type": "Video", "Index": float64(1), "Codec": "hevc", "Width": float64(3840), "Height": float64(2160)},
+						},
+					},
+				},
+			},
+			expect: map[string]any{
+				"id":            "det13g",
+				"name":          "Cover First",
+				"type":          "Movie",
+				"has_subtitles": false,
+				"media_sources": []map[string]any{
+					{
+						"container":        "mkv",
+						"video_codec":      "hevc",
+						"resolution":       "3840x2160",
+						"subtitle_streams": []any{},
+					},
+				},
 			},
 		},
 		{
@@ -889,6 +1017,17 @@ func TestDetailedItemFrom(t *testing.T) {
 			for _, k := range []string{"genres", "tags", "studios", "locked_fields"} {
 				if _, ok := tc.expect[k]; !ok {
 					tc.expect[k] = []any{}
+				}
+			}
+			itemType, _ := tc.input["Type"].(string)
+			if isDetailedVideoType(itemType) {
+				if _, ok := tc.expect["has_subtitles"]; !ok {
+					tc.expect["has_subtitles"] = false
+				}
+			}
+			if itemType == "Audio" {
+				if _, ok := tc.expect["has_lyrics"]; !ok {
+					tc.expect["has_lyrics"] = false
 				}
 			}
 			assertJSONEqual(t, DetailedItemFrom(tc.input), tc.expect)
@@ -1089,11 +1228,13 @@ func TestSessionFrom(t *testing.T) {
 		{
 			name: "NowPlayingItem with zero RunTimeTicks omits runtime",
 			input: map[string]any{
-				"Id":               "sess-004",
-				"UserName":         "dave",
-				"Client":           "Web",
-				"DeviceName":       "Firefox",
-				"LastActivityDate": "2024-05-20T08:15:00Z",
+				"Id":                 "sess-004",
+				"UserName":           "dave",
+				"Client":             "Web",
+				"ApplicationVersion": "10.10.7",
+				"DeviceName":         "Firefox",
+				"RemoteEndPoint":     "192.0.2.42",
+				"LastActivityDate":   "2024-05-20T08:15:00Z",
 				"NowPlayingItem": map[string]any{
 					"Id":           "item-live",
 					"Name":         "Live Stream",
@@ -1105,7 +1246,9 @@ func TestSessionFrom(t *testing.T) {
 				"session_id":             "sess-004",
 				"user":                   "dave",
 				"client":                 "Web",
+				"app_version":            "10.10.7",
 				"device_name":            "Firefox",
+				"remote_ip":              "192.0.2.42",
 				"supports_media_control": false,
 				"last_activity":          "2024-05-20T17:15:00+09:00",
 				"status":                 "playing",

@@ -100,6 +100,7 @@ type playlistEdit struct {
 	rebuild         string // the run of entries removed and added back, as a sentence
 	hides           bool   // the edit may leave the playlist hidden from the configured user
 	userID          string
+	userLabel       string
 }
 
 // handlePlaylistEdit carries out the remove_items, deduplicate, and move_item
@@ -121,6 +122,23 @@ func handlePlaylistEdit(ctx context.Context, req *mcp.CallToolRequest, client jf
 	if args.Action == "deduplicate" && args.DryRun == nil {
 		dryRun = true
 	}
+	if dryRun && args.Confirm != nil && *args.Confirm {
+		if args.DryRun == nil {
+			return jf.ErrResult("dry_run defaults to true for '%s'. Pass both dry_run=false and confirm=true to apply a confirmed change (or dry_run=false without confirm to preview confirmation first).", args.Action), nil, nil
+		}
+		return jf.ErrResult("confirm=true cannot be combined with dry_run=true; pass both dry_run=false and confirm=true to apply a confirmed change."), nil, nil
+	}
+	if !dryRun && (args.Action == "remove_items" || args.Action == "deduplicate") {
+		if res := jf.DestructiveDisabledError(ctx); res != nil {
+			return res, nil, nil
+		}
+	}
+
+	resolvedID, err := jf.ResolvePlaylistID(ctx, client, userID, args.PlaylistID)
+	if err != nil {
+		return jf.ResolveErrResult(err), nil, nil
+	}
+	args.PlaylistID = resolvedID
 
 	unlock, err := locks.lock(ctx, args.PlaylistID)
 	if err != nil {
@@ -131,7 +149,7 @@ func handlePlaylistEdit(ctx context.Context, req *mcp.CallToolRequest, client jf
 	// A call that carries the answer to the confirmation form runs again from
 	// the top, on the same progress token for an older client, so it skips the
 	// first step's notification to keep the reported progress increasing.
-	if len(req.Params.InputResponses) == 0 {
+	if req != nil && req.Params != nil && len(req.Params.InputResponses) == 0 {
 		jf.ReportProgress(ctx, req, 0, 3, "Reading the playlist...")
 	}
 	entries, err := jf.FetchPlaylistEntries(ctx, client, args.PlaylistID, userID)
@@ -221,7 +239,8 @@ func handlePlaylistEdit(ctx context.Context, req *mcp.CallToolRequest, client jf
 		e.rebuild = fmt.Sprintf("To keep the order, the last %d %s removed and added back at the end.", len(edit.Append), plural(len(edit.Append), "entry is", "entries are"))
 	}
 	if e.hides {
-		e.effect += fmt.Sprintf(" This removes every entry user %s can see, so the playlist may disappear for them: Jellyfin 12 hides a playlist from a user with a parental rating limit while all of its remaining entries are above that limit.", userID)
+		e.userLabel = userName(ctx, client, userID)
+		e.effect += fmt.Sprintf(" This removes every entry user '%s' can see, so the playlist may disappear for them: Jellyfin 12 hides a playlist from a user with a parental rating limit while all of its remaining entries are above that limit.", e.userLabel)
 	}
 	if warning != "" {
 		for _, extra := range []string{e.rebuild, hidesSentence(e)} {
@@ -290,7 +309,7 @@ func hidesSentence(e playlistEdit) string {
 	if !e.hides {
 		return ""
 	}
-	return fmt.Sprintf("The playlist may then disappear for user %s, whose parental rating limit hides a playlist whose remaining entries are all above it.", e.userID)
+	return fmt.Sprintf("The playlist may then disappear for user '%s', whose parental rating limit hides a playlist whose remaining entries are all above it.", e.userLabel)
 }
 
 // finishSteps gives the edit's own requests as steps that reach its target
@@ -311,7 +330,7 @@ func (e playlistEdit) finishSteps() string {
 // unreadResult reports an edit whose playlist could not be read back.
 func (e playlistEdit) unreadResult(applyErr, readErr error) *mcp.CallToolResult {
 	if applyErr == nil && e.hides && isStatus(readErr, http.StatusNotFound) {
-		return jf.TextResult(e.effect + fmt.Sprintf("\n\nEvery request succeeded. The playlist can no longer be found as user %s, which is expected after removing every entry they can see.", e.userID))
+		return jf.TextResult(e.effect + fmt.Sprintf("\n\nEvery request succeeded. The playlist can no longer be found as user '%s', which is expected after removing every entry they can see.", e.userLabel))
 	}
 	var msg string
 	if applyErr == nil {
@@ -471,20 +490,70 @@ func itemName(ctx context.Context, client jf.Client, itemID, userID string) stri
 	return itemID
 }
 
-// itemNames looks up the names of ids in one request; an id that is not found
-// is absent from the map, and nameList then shows the id itself.
-func itemNames(ctx context.Context, client jf.Client, ids []string, userID string) map[string]string {
+const missingItemIDHint = "Use jellyfin_search or jellyfin_browse to find valid item IDs first."
+
+// requireItemName looks up itemID before a dry-run or confirmation prompt and
+// fails with a search/browse recovery hint when Jellyfin rejects or cannot find
+// the ID. Minimal unit-test mocks that leave item nil fall back to itemID.
+func requireItemName(ctx context.Context, client jf.Client, itemID, userID string) (string, *mcp.CallToolResult) {
+	var item map[string]any
+	if userID == "" {
+		userID, _ = client.GetUserID(ctx)
+	}
+	params := url.Values{}
+	if userID != "" {
+		params.Set("UserId", userID)
+	}
+	if err := client.Get(ctx, "/Items/"+jf.SanitizeID(itemID), params, &item); err != nil {
+		var apiErr *jf.APIError
+		if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusBadRequest || apiErr.StatusCode == http.StatusNotFound) {
+			return "", jf.ErrResultWithHint(missingItemIDHint, "Item %q was not found: %v", itemID, err)
+		}
+		return "", jf.ErrResult("Jellyfin API error: %v", err)
+	}
+	if name := jf.GetString(item, "Name"); name != "" {
+		return name, nil
+	}
+	return itemID, nil
+}
+
+// requireItemNames looks up ids in one /Items request before a dry-run or
+// confirmation prompt and fails with a search/browse recovery hint when
+// Jellyfin rejects the query or omits a requested ID. Minimal unit-test mocks
+// that leave out.Items nil return an empty map so nameList falls back to ids.
+func requireItemNames(ctx context.Context, client jf.Client, ids []string, userID string) (map[string]string, *mcp.CallToolResult) {
 	names := make(map[string]string, len(ids))
 	var out struct {
 		Items []map[string]any `json:"Items"`
 	}
-	if err := client.Get(ctx, "/Items", url.Values{"Ids": {jf.JoinIDs(ids)}, "UserId": {userID}}, &out); err != nil {
-		return names
+	params := url.Values{"Ids": {jf.JoinIDs(ids)}}
+	if userID != "" {
+		params.Set("UserId", userID)
 	}
+	if err := client.Get(ctx, "/Items", params, &out); err != nil {
+		var apiErr *jf.APIError
+		if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusBadRequest || apiErr.StatusCode == http.StatusNotFound) {
+			return nil, jf.ErrResultWithHint(missingItemIDHint, "One or more item_ids could not be found: %v", err)
+		}
+		return nil, jf.ErrResult("Jellyfin API error: %v", err)
+	}
+	if out.Items == nil {
+		return names, nil
+	}
+	present := make(map[string]bool, len(out.Items))
 	for _, it := range out.Items {
-		names[jf.NormalizeID(jf.GetString(it, "Id"))] = jf.GetString(it, "Name")
+		norm := jf.NormalizeID(jf.GetString(it, "Id"))
+		if norm != "" {
+			present[norm] = true
+			names[norm] = jf.GetString(it, "Name")
+		}
 	}
-	return names
+	for _, id := range ids {
+		if !present[jf.NormalizeID(id)] {
+			return nil, jf.ErrResultWithHint(missingItemIDHint, "Item %q was not found.", id)
+		}
+	}
+	return names, nil
 }
 
 // nameList names up to three items for a confirmation message, then counts

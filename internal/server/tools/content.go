@@ -102,106 +102,100 @@ func decodeBase64Head(s string, limit int) (text string, size int, head []byte, 
 	return text, n + int(rest), head, nil
 }
 
-// metadataFields names the fields a metadata update or batch_update would
-// write, for its preview and confirmation.
-func metadataFields(args jf.MetadataInput) []string {
+func formatStringSlice(vals []string) string {
+	quoted := make([]string, len(vals))
+	for i, v := range vals {
+		quoted[i] = fmt.Sprintf("%q", v)
+	}
+	return "[" + strings.Join(quoted, ", ") + "]"
+}
+
+// metadataChangeSummary formats the fields and values a metadata update or
+// batch_update writes, keeping field names in their input spelling.
+func metadataChangeSummary(args jf.MetadataInput) []string {
 	var fields []string
 	if args.Name != "" {
-		fields = append(fields, "name")
+		fields = append(fields, fmt.Sprintf("name=%q", args.Name))
 	}
 	if args.Overview != "" {
-		fields = append(fields, "overview")
+		ov := args.Overview
+		if len([]rune(ov)) > 60 {
+			ov = jf.Truncate(ov, 60) + "…"
+		}
+		fields = append(fields, fmt.Sprintf("overview=%q", ov))
 	}
 	if len(args.Genres) > 0 {
-		fields = append(fields, "genres")
+		fields = append(fields, fmt.Sprintf("genres=%s", formatStringSlice(args.Genres)))
 	}
 	if len(args.Tags) > 0 {
-		fields = append(fields, "tags")
+		fields = append(fields, fmt.Sprintf("tags=%s", formatStringSlice(args.Tags)))
 	}
 	if len(args.Studios) > 0 {
-		fields = append(fields, "studios")
+		fields = append(fields, fmt.Sprintf("studios=%s", formatStringSlice(args.Studios)))
 	}
 	if args.Year != nil {
-		fields = append(fields, "production_year")
+		fields = append(fields, fmt.Sprintf("production_year=%d", *args.Year))
 	}
 	if args.CommunityRating != nil {
-		fields = append(fields, "community_rating")
+		fields = append(fields, fmt.Sprintf("community_rating=%.1f", *args.CommunityRating))
 	}
 	if args.OfficialRating != "" {
-		fields = append(fields, "official_rating")
+		fields = append(fields, fmt.Sprintf("official_rating=%q", args.OfficialRating))
 	}
 	if args.SortName != "" {
-		fields = append(fields, "sort_name")
+		fields = append(fields, fmt.Sprintf("sort_name=%q", args.SortName))
 	}
 	if len(args.LockedFields) > 0 {
-		fields = append(fields, "locked_fields")
+		fields = append(fields, fmt.Sprintf("locked_fields=%s", formatStringSlice(args.LockedFields)))
 	}
 	return fields
 }
 
+func metadataListReplacementNote(args jf.MetadataInput) string {
+	var lists []string
+	if len(args.Genres) > 0 {
+		lists = append(lists, "genres")
+	}
+	if len(args.Tags) > 0 {
+		lists = append(lists, "tags")
+	}
+	if len(args.Studios) > 0 {
+		lists = append(lists, "studios")
+	}
+	if len(args.LockedFields) > 0 {
+		lists = append(lists, "locked_fields")
+	}
+	if len(lists) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" Replacing %s overwrites existing values in %s.", strings.Join(lists, ", "), plural(len(lists), "that list", "those lists"))
+}
+
 func RegisterContentTools(server *mcp.Server, client jf.Client, enabled func(string, *mcp.ToolAnnotations) bool) {
 
-	// --- jellyfin_videos ---
-	if enabled("jellyfin_videos", AnnotDestructive) {
-		mcp.AddTool(server, &mcp.Tool{
-			Name:  "jellyfin_videos",
-			Title: "Video Versions",
-			InputSchema: jf.WithEnums[jf.VideosInput](map[string][]any{
-				"action": {"merge_versions", "split_versions"},
-			}),
-			Description: "Manage video file versions. Use 'merge_versions' to combine multiple items as alternate versions of the same title " +
-				"(such as 4K and 1080p copies). Use 'split_versions' to undo a merge and restore items as separate entries. " +
-				"Both actions ask the user to confirm. Get item IDs from jellyfin_search or jellyfin_browse.",
-			Annotations: AnnotDestructive,
-		}, func(ctx context.Context, req *mcp.CallToolRequest, args jf.VideosInput) (*mcp.CallToolResult, any, error) {
-			switch args.Action {
-			case "merge_versions":
-				ids := jf.SplitIDs(args.ItemIDs)
-				if len(ids) < 2 {
-					return jf.ErrResult("item_ids must contain at least 2 item IDs to merge."), nil, nil
-				}
-				if result := jf.DestructiveGate(ctx, req, args.Confirm, fmt.Sprintf("Merge %d items into alternate versions of one item? Jellyfin keeps the highest-resolution copy as the primary version.", len(ids))); result != nil {
-					return result, nil, nil
-				}
-				params := url.Values{"ids": {jf.JoinIDs(ids)}}
-				if err := client.PostNoContent(ctx, "/Videos/MergeVersions", params, nil); err != nil {
-					return jf.ErrResult("Failed to merge versions: %v", err), nil, nil
-				}
-				return jf.TextResult(fmt.Sprintf("Merged %d items as alternate versions.", len(ids))), nil, nil
-
-			case "split_versions":
-				if args.ItemID == "" {
-					return jf.ErrResultWithHint("Use jellyfin_search to find the merged item ID.", "item_id is required for split_versions."), nil, nil
-				}
-				if result := jf.DestructiveGate(ctx, req, args.Confirm, fmt.Sprintf("Split the alternate versions of '%s' back into separate items?", itemName(ctx, client, args.ItemID, ""))); result != nil {
-					return result, nil, nil
-				}
-				endpoint := fmt.Sprintf("/Videos/%s/AlternateSources", jf.SanitizeID(args.ItemID))
-				if err := client.Del(ctx, endpoint, nil); err != nil {
-					return jf.ErrResult("Failed to split versions: %v", err), nil, nil
-				}
-				return jf.TextResult("Alternate versions split into separate items."), nil, nil
-
-			default:
-				return jf.ErrResult("Invalid action '%s'. Valid actions: merge_versions, split_versions", args.Action), nil, nil
-			}
-		})
-	}
-
 	// --- jellyfin_metadata ---
-	if enabled("jellyfin_metadata", AnnotWriteOp) {
+	if ok, ro, annot := toolMode(enabled, "jellyfin_metadata", AnnotDestructiveOpenWorld, AnnotReadOnlyOpenWorld); ok {
+		roActions := []any{"search", "editor_info", "external_ids"}
+		schema := jf.WithEnums[jf.MetadataInput](map[string][]any{
+			"action": {"search", "apply", "update", "batch_update", "editor_info", "external_ids", "merge_versions", "split_versions"},
+		})
+		desc := "Search online metadata providers, identify items (apply), edit item fields (update/batch_update), inspect editor_info/external_ids, or merge/split multi-version video entries (omit confirm first to preview changes)."
+		if ro {
+			schema = jf.WithEnumsFiltered[jf.MetadataInput](map[string][]any{"action": roActions}, []string{"action", "item_id", "search_type", "search_query", "search_year"})
+			desc = "Search online metadata providers or inspect item metadata editor info and external provider IDs."
+		}
 		mcp.AddTool(server, &mcp.Tool{
-			Name:  "jellyfin_metadata",
-			Title: "Metadata",
-			InputSchema: jf.WithEnums[jf.MetadataInput](map[string][]any{
-				"action": {"search", "apply", "update", "batch_update", "editor_info", "external_ids"},
-			}),
-			Description: "Search for and manage item metadata from online providers. Use 'search' to find metadata matches, then 'apply' to identify an item as one of them. " +
-				"For 'apply', provider_name is a key from the chosen result's provider_ids, such as Tmdb, Imdb, or Tvdb, rather than a provider's display name such as TheMovieDb, and provider_id is that key's value. " +
-				"Applying a match replaces the item's provider IDs, metadata, and images with the match's. " +
-				"Also supports 'update' for manual field edits, 'batch_update' for bulk changes, 'editor_info', and 'external_ids'.",
-			Annotations: AnnotWriteOp,
+			Name:        "jellyfin_metadata",
+			Title:       "Metadata & Versions",
+			InputSchema: schema,
+			Description: desc,
+			Annotations: annot,
 		}, func(ctx context.Context, req *mcp.CallToolRequest, args jf.MetadataInput) (*mcp.CallToolResult, any, error) {
+			if ro {
+				if res := requireReadOnlyAction(args.Action, roActions); res != nil {
+					return res, nil, nil
+				}
+			}
 			switch args.Action {
 			case "search":
 				if args.SearchType == "" || args.SearchQuery == "" {
@@ -256,7 +250,15 @@ func RegisterContentTools(server *mcp.Server, client jf.Client, enabled func(str
 				// different title, so the old match's artwork is replaced along
 				// with its metadata.
 				params := url.Values{"ReplaceAllImages": {"true"}}
-				if result := jf.ConfirmationGate(ctx, req, args.Confirm, fmt.Sprintf("Identify '%s' as %s %s? Its provider IDs, metadata, and images are replaced with the match's.", itemName(ctx, client, args.ItemID, ""), providerKey, providerID)); result != nil {
+				var applyWarning string
+				if jf.ConfirmationNeededIn(ctx, req, args.Confirm) {
+					name, errRes := requireItemName(ctx, client, args.ItemID, "")
+					if errRes != nil {
+						return errRes, nil, nil
+					}
+					applyWarning = fmt.Sprintf("Identify '%s' using %s ID '%s'? Its provider IDs, metadata, and images are replaced with the provider match.", name, providerKey, providerID)
+				}
+				if result := jf.ConfirmationGate(ctx, req, args.Confirm, applyWarning); result != nil {
 					return result, nil, nil
 				}
 				endpoint := fmt.Sprintf("/Items/RemoteSearch/Apply/%s", jf.SanitizeID(args.ItemID))
@@ -269,7 +271,7 @@ func RegisterContentTools(server *mcp.Server, client jf.Client, enabled func(str
 				if args.ItemID == "" {
 					return jf.ErrResult("item_id is required for update."), nil, nil
 				}
-				fields := metadataFields(args)
+				fields := metadataChangeSummary(args)
 				if len(fields) == 0 {
 					return jf.ErrResult("No fields to update. Provide at least one field (name, overview, genres, tags, studios, production_year, community_rating, official_rating, sort_name, locked_fields)."), nil, nil
 				}
@@ -277,11 +279,26 @@ func RegisterContentTools(server *mcp.Server, client jf.Client, enabled func(str
 				if err != nil {
 					return jf.ErrResult("Jellyfin error: %v", err), nil, nil
 				}
-				name := itemName(ctx, client, args.ItemID, userID)
+				listNote := metadataListReplacementNote(args)
 				if args.DryRun != nil && *args.DryRun {
-					return jf.TextResult(fmt.Sprintf("Dry run, no changes made. An update of '%s' writes these fields: %s\n\nCall again without dry_run to apply; the user is asked to confirm.", name, strings.Join(fields, ", "))), nil, nil
+					if args.Confirm != nil && *args.Confirm {
+						return jf.ErrResult("confirm=true cannot be combined with dry_run=true; omit dry_run or pass both dry_run=false and confirm=true to apply a confirmed change."), nil, nil
+					}
+					name, errRes := requireItemName(ctx, client, args.ItemID, userID)
+					if errRes != nil {
+						return errRes, nil, nil
+					}
+					return jf.TextResult(fmt.Sprintf("Dry run, no changes made. An update of '%s' writes: %s.%s\n\nCall again without dry_run to apply; the user is asked to confirm.", name, strings.Join(fields, ", "), listNote)), nil, nil
 				}
-				if result := jf.ConfirmationGate(ctx, req, args.Confirm, fmt.Sprintf("Update the metadata of '%s'? Fields written: %s.", name, strings.Join(fields, ", "))); result != nil {
+				var updateWarning string
+				if jf.ConfirmationNeededIn(ctx, req, args.Confirm) {
+					name, errRes := requireItemName(ctx, client, args.ItemID, userID)
+					if errRes != nil {
+						return errRes, nil, nil
+					}
+					updateWarning = fmt.Sprintf("Update metadata of '%s'? Changes: %s.%s", name, strings.Join(fields, ", "), listNote)
+				}
+				if result := jf.ConfirmationGate(ctx, req, args.Confirm, updateWarning); result != nil {
 					return result, nil, nil
 				}
 
@@ -309,24 +326,44 @@ func RegisterContentTools(server *mcp.Server, client jf.Client, enabled func(str
 				if len(args.ItemIDs) > 50 {
 					return jf.ErrResult("batch_update supports at most 50 items at a time."), nil, nil
 				}
-				fields := metadataFields(args)
+				fields := metadataChangeSummary(args)
 				if len(fields) == 0 {
 					return jf.ErrResult("No fields to update. Provide at least one field (name, overview, genres, tags, studios, production_year, community_rating, official_rating, sort_name, locked_fields)."), nil, nil
 				}
+				userID, err := client.GetUserID(ctx)
+				if err != nil {
+					return jf.ErrResult("Jellyfin error: %v", err), nil, nil
+				}
+				listNote := metadataListReplacementNote(args)
 
 				// Dry-run mode: default true — preview changes without applying
 				dryRun := args.DryRun == nil || *args.DryRun
 				if dryRun {
-					return jf.TextResult(fmt.Sprintf("Dry run, no changes made. An update of %d %s writes these fields: %s\n\nSet dry_run=false to apply; the user is asked to confirm.", len(args.ItemIDs), plural(len(args.ItemIDs), "item", "items"), strings.Join(fields, ", "))), nil, nil
+					if args.Confirm != nil && *args.Confirm {
+						if args.DryRun == nil {
+							return jf.ErrResult("dry_run defaults to true for 'batch_update'. Pass both dry_run=false and confirm=true to apply a confirmed change (or dry_run=false without confirm to preview confirmation first)."), nil, nil
+						}
+						return jf.ErrResult("confirm=true cannot be combined with dry_run=true; pass both dry_run=false and confirm=true to apply a confirmed change."), nil, nil
+					}
+					names, errRes := requireItemNames(ctx, client, args.ItemIDs, userID)
+					if errRes != nil {
+						return errRes, nil, nil
+					}
+					targetNames := nameList(args.ItemIDs, names)
+					return jf.TextResult(fmt.Sprintf("Dry run, no changes made. An update of %d %s (%s) writes: %s.%s\n\nSet dry_run=false to apply; the user is asked to confirm.", len(args.ItemIDs), plural(len(args.ItemIDs), "item", "items"), targetNames, strings.Join(fields, ", "), listNote)), nil, nil
 				}
 
-				if result := jf.ConfirmationGate(ctx, req, args.Confirm, fmt.Sprintf("Update the metadata of %d %s? Fields written: %s.", len(args.ItemIDs), plural(len(args.ItemIDs), "item", "items"), strings.Join(fields, ", "))); result != nil {
+				var batchWarning string
+				if jf.ConfirmationNeededIn(ctx, req, args.Confirm) {
+					names, errRes := requireItemNames(ctx, client, args.ItemIDs, userID)
+					if errRes != nil {
+						return errRes, nil, nil
+					}
+					targetNames := nameList(args.ItemIDs, names)
+					batchWarning = fmt.Sprintf("Update metadata of %d %s (%s)? Changes: %s.%s", len(args.ItemIDs), plural(len(args.ItemIDs), "item", "items"), targetNames, strings.Join(fields, ", "), listNote)
+				}
+				if result := jf.ConfirmationGate(ctx, req, args.Confirm, batchWarning); result != nil {
 					return result, nil, nil
-				}
-
-				userID, err := client.GetUserID(ctx)
-				if err != nil {
-					return jf.ErrResult("Jellyfin error: %v", err), nil, nil
 				}
 				total := float64(len(args.ItemIDs))
 				successes := 0
@@ -370,32 +407,87 @@ func RegisterContentTools(server *mcp.Server, client jf.Client, enabled func(str
 				}
 				return jf.TextResult(jf.FormatJSON(ids)), nil, nil
 
+			case "merge_versions":
+				ids := jf.SplitIDs(args.ItemIDs)
+				if len(ids) < 2 {
+					return jf.ErrResult("item_ids must contain at least 2 item IDs to merge."), nil, nil
+				}
+				if res := jf.DestructiveDisabledError(ctx); res != nil {
+					return res, nil, nil
+				}
+				var warning string
+				if jf.ConfirmationNeededIn(ctx, req, args.Confirm) {
+					var preErr *mcp.CallToolResult
+					warning, preErr = inspectMergeVersions(ctx, client, ids)
+					if preErr != nil {
+						return preErr, nil, nil
+					}
+				}
+				if result := jf.DestructiveGate(ctx, req, args.Confirm, warning); result != nil {
+					return result, nil, nil
+				}
+				params := url.Values{"ids": {jf.JoinIDs(ids)}}
+				if err := client.PostNoContent(ctx, "/Videos/MergeVersions", params, nil); err != nil {
+					return jf.ErrResult("Failed to merge versions: %v", err), nil, nil
+				}
+				return jf.TextResult(fmt.Sprintf("Merged %d items as alternate versions.", len(ids))), nil, nil
+
+			case "split_versions":
+				if args.ItemID == "" {
+					return jf.ErrResultWithHint("Use jellyfin_search to find the merged item ID.", "item_id is required for split_versions."), nil, nil
+				}
+				if res := jf.DestructiveDisabledError(ctx); res != nil {
+					return res, nil, nil
+				}
+				warning, preErr := inspectSplitVersions(ctx, client, args.ItemID)
+				if preErr != nil {
+					return preErr, nil, nil
+				}
+				if result := jf.DestructiveGate(ctx, req, args.Confirm, warning); result != nil {
+					return result, nil, nil
+				}
+				endpoint := fmt.Sprintf("/Videos/%s/AlternateSources", jf.SanitizeID(args.ItemID))
+				if err := client.Del(ctx, endpoint, nil); err != nil {
+					return jf.ErrResult("Failed to split versions: %v", err), nil, nil
+				}
+				return jf.TextResult("Alternate versions split into separate items."), nil, nil
+
 			default:
-				return jf.ErrResult("Invalid action '%s'. Valid actions: search, apply, update, batch_update, editor_info, external_ids", args.Action), nil, nil
+				return jf.ErrResult("Invalid action '%s'. Valid actions: search, apply, update, batch_update, editor_info, external_ids, merge_versions, split_versions", args.Action), nil, nil
 			}
 		})
 	}
 
 	// --- jellyfin_subtitles_lyrics ---
-	if enabled("jellyfin_subtitles_lyrics", AnnotWriteOp) {
+	if ok, ro, annot := toolMode(enabled, "jellyfin_subtitles_lyrics", AnnotDestructiveOpenWorld, AnnotReadOnlyOpenWorld); ok {
+		roActions := []any{"search_subtitles", "get_lyrics", "search_lyrics"}
+		schema := jf.WithEnums[jf.SubtitlesLyricsInput](map[string][]any{
+			"action": {"search_subtitles", "download_subtitle", "delete_subtitle", "batch_download_subtitles", "upload_subtitle", "get_lyrics", "search_lyrics", "download_lyrics", "delete_lyrics"},
+		})
+		desc := fmt.Sprintf("Search, download, upload (formats: ass, mks, sami, smi, srt, ssa, sub, sup, vtt; max %d MiB), or delete external subtitles and song lyrics.", maxUploadBytes>>20)
+		if ro {
+			schema = jf.WithEnumsFiltered[jf.SubtitlesLyricsInput](map[string][]any{"action": roActions}, []string{"action", "item_id", "language"})
+			desc = "Search online subtitle/lyric providers or read an item's current lyrics."
+		}
 		mcp.AddTool(server, &mcp.Tool{
-			Name:  "jellyfin_subtitles_lyrics",
-			Title: "Subtitles & Lyrics",
-			InputSchema: jf.WithEnums[jf.SubtitlesLyricsInput](map[string][]any{
-				"action": {"search_subtitles", "download_subtitle", "delete_subtitle", "batch_download_subtitles", "upload_subtitle", "get_lyrics", "search_lyrics", "download_lyrics", "delete_lyrics"},
-			}),
-			Description: "Search for, download, and manage subtitles and lyrics. For subtitles: use 'search_subtitles' with item_id and language to find available subtitles online, " +
-				"'download_subtitle' with subtitle_id to download one, 'delete_subtitle' with subtitle_index to remove a track (asks the user to confirm). " +
-				"Use 'batch_download_subtitles' with item_ids (max 25) to search and download subtitles for multiple items (asks the user to confirm). " +
-				fmt.Sprintf("Use 'upload_subtitle' with item_id, subtitle_data (the base64-encoded file, at most %d MiB), and subtitle_format, which must be one of ass, mks, sami, smi, srt, ssa, sub, sup, or vtt. ", maxUploadBytes>>20) +
-				"For lyrics: use 'get_lyrics' to view current lyrics, 'search_lyrics' to find lyrics online, " +
-				"'download_lyrics' with lyric_id to download, 'delete_lyrics' to remove (asks the user to confirm). Language codes use ISO 639 format (such as en, es, fr, de, ja).",
-			Annotations: AnnotWriteOp,
+			Name:        "jellyfin_subtitles_lyrics",
+			Title:       "Subtitles & Lyrics",
+			InputSchema: schema,
+			Description: desc,
+			Annotations: annot,
 		}, func(ctx context.Context, req *mcp.CallToolRequest, args jf.SubtitlesLyricsInput) (*mcp.CallToolResult, any, error) {
-			itemID := jf.SanitizeID(args.ItemID)
+			if ro {
+				if res := requireReadOnlyAction(args.Action, roActions); res != nil {
+					return res, nil, nil
+				}
+			}
+			itemID := jf.SanitizeID(strings.TrimSpace(args.ItemID))
 
 			switch args.Action {
 			case "search_subtitles":
+				if itemID == "" {
+					return jf.ErrResult("item_id is required for search_subtitles."), nil, nil
+				}
 				lang := args.Language
 				if lang == "" {
 					lang = "en"
@@ -422,6 +514,9 @@ func RegisterContentTools(server *mcp.Server, client jf.Client, enabled func(str
 				if args.SubtitleID == "" {
 					return jf.ErrResult("subtitle_id is required. Use 'search_subtitles' to find subtitle IDs."), nil, nil
 				}
+				if itemID == "" {
+					return jf.ErrResult("item_id is required for download_subtitle."), nil, nil
+				}
 				endpoint := fmt.Sprintf("/Items/%s/RemoteSearch/Subtitles/%s", itemID, jf.SanitizeID(args.SubtitleID))
 				if err := client.PostNoContent(ctx, endpoint, nil, nil); err != nil {
 					return jf.ErrResult("Failed to download subtitle: %v", err), nil, nil
@@ -432,7 +527,17 @@ func RegisterContentTools(server *mcp.Server, client jf.Client, enabled func(str
 				if args.SubtitleIndex == nil {
 					return jf.ErrResult("subtitle_index is required. Get the index from jellyfin_get_item media source info."), nil, nil
 				}
-				if result := jf.DestructiveGate(ctx, req, args.Confirm, fmt.Sprintf("Delete subtitle track %d from '%s'? Its subtitle file is removed.", *args.SubtitleIndex, itemName(ctx, client, args.ItemID, ""))); result != nil {
+				if itemID == "" {
+					return jf.ErrResult("item_id is required for delete_subtitle."), nil, nil
+				}
+				if res := jf.DestructiveDisabledError(ctx); res != nil {
+					return res, nil, nil
+				}
+				warning, preErr := inspectSubtitleDeletion(ctx, client, args.ItemID, *args.SubtitleIndex)
+				if preErr != nil {
+					return preErr, nil, nil
+				}
+				if result := jf.DestructiveGate(ctx, req, args.Confirm, warning); result != nil {
 					return result, nil, nil
 				}
 				endpoint := fmt.Sprintf("/Videos/%s/Subtitles/%d", itemID, *args.SubtitleIndex)
@@ -453,7 +558,16 @@ func RegisterContentTools(server *mcp.Server, client jf.Client, enabled func(str
 				if lang == "" {
 					lang = "en"
 				}
-				if result := jf.ConfirmationGate(ctx, req, args.Confirm, fmt.Sprintf("Search for and download subtitles for %d %s in language '%s'? The first match for each item is downloaded.", len(args.ItemIDs), plural(len(args.ItemIDs), "item", "items"), lang)); result != nil {
+				var subWarning string
+				if jf.ConfirmationNeededIn(ctx, req, args.Confirm) {
+					userID, _ := client.GetUserID(ctx)
+					names, errRes := requireItemNames(ctx, client, args.ItemIDs, userID)
+					if errRes != nil {
+						return errRes, nil, nil
+					}
+					subWarning = fmt.Sprintf("Search for and download '%s' subtitles for %d %s (%s)? The first provider match for each item is saved.", lang, len(args.ItemIDs), plural(len(args.ItemIDs), "item", "items"), nameList(args.ItemIDs, names))
+				}
+				if result := jf.ConfirmationGate(ctx, req, args.Confirm, subWarning); result != nil {
 					return result, nil, nil
 				}
 				total := float64(len(args.ItemIDs))
@@ -491,6 +605,9 @@ func RegisterContentTools(server *mcp.Server, client jf.Client, enabled func(str
 				return jf.TextResult(fmt.Sprintf("Batch subtitle download complete. Downloaded %d of %d:\n\n%s", downloaded, len(args.ItemIDs), jf.FormatJSON(results))), nil, nil
 
 			case "get_lyrics":
+				if itemID == "" {
+					return jf.ErrResult("item_id is required for get_lyrics."), nil, nil
+				}
 				endpoint := fmt.Sprintf("/Audio/%s/Lyrics", itemID)
 				var result map[string]any
 				if err := client.Get(ctx, endpoint, nil, &result); err != nil {
@@ -499,6 +616,9 @@ func RegisterContentTools(server *mcp.Server, client jf.Client, enabled func(str
 				return jf.TextResult(jf.FormatJSON(result)), nil, nil
 
 			case "search_lyrics":
+				if itemID == "" {
+					return jf.ErrResult("item_id is required for search_lyrics."), nil, nil
+				}
 				endpoint := fmt.Sprintf("/Audio/%s/RemoteSearch/Lyrics", itemID)
 				var results []map[string]any
 				if err := client.Get(ctx, endpoint, nil, &results); err != nil {
@@ -510,6 +630,9 @@ func RegisterContentTools(server *mcp.Server, client jf.Client, enabled func(str
 				if args.LyricID == "" {
 					return jf.ErrResult("lyric_id is required. Use 'search_lyrics' to find lyric IDs."), nil, nil
 				}
+				if itemID == "" {
+					return jf.ErrResult("item_id is required for download_lyrics."), nil, nil
+				}
 				endpoint := fmt.Sprintf("/Audio/%s/RemoteSearch/Lyrics/%s", itemID, jf.SanitizeID(args.LyricID))
 				if err := client.PostNoContent(ctx, endpoint, nil, nil); err != nil {
 					return jf.ErrResult("Failed to download lyrics: %v", err), nil, nil
@@ -517,7 +640,7 @@ func RegisterContentTools(server *mcp.Server, client jf.Client, enabled func(str
 				return jf.TextResult("Lyrics downloaded and added to item."), nil, nil
 
 			case "upload_subtitle":
-				if args.ItemID == "" {
+				if itemID == "" {
 					return jf.ErrResult("item_id is required for upload_subtitle."), nil, nil
 				}
 				if args.SubtitleData == "" || args.SubtitleFormat == "" {
@@ -577,7 +700,21 @@ func RegisterContentTools(server *mcp.Server, client jf.Client, enabled func(str
 				return jf.TextResult(fmt.Sprintf("Subtitle uploaded (%s, %s). The track appears once the server finishes refreshing the item.", format, lang)), nil, nil
 
 			case "delete_lyrics":
-				if result := jf.DestructiveGate(ctx, req, args.Confirm, fmt.Sprintf("Delete the lyrics of '%s'? The lyrics file is removed.", itemName(ctx, client, args.ItemID, ""))); result != nil {
+				if itemID == "" {
+					return jf.ErrResult("item_id is required for delete_lyrics."), nil, nil
+				}
+				if res := jf.DestructiveDisabledError(ctx); res != nil {
+					return res, nil, nil
+				}
+				var lyricWarning string
+				if jf.ConfirmationNeededIn(ctx, req, args.Confirm) {
+					name, errRes := requireItemName(ctx, client, args.ItemID, "")
+					if errRes != nil {
+						return errRes, nil, nil
+					}
+					lyricWarning = fmt.Sprintf("Delete the lyrics of '%s'? The lyrics file is removed.", name)
+				}
+				if result := jf.DestructiveGate(ctx, req, args.Confirm, lyricWarning); result != nil {
 					return result, nil, nil
 				}
 				endpoint := fmt.Sprintf("/Audio/%s/Lyrics", itemID)
@@ -593,27 +730,38 @@ func RegisterContentTools(server *mcp.Server, client jf.Client, enabled func(str
 	}
 
 	// --- jellyfin_images ---
-	if enabled("jellyfin_images", AnnotWriteOp) {
+	if ok, ro, annot := toolMode(enabled, "jellyfin_images", AnnotWriteOpenWorld, AnnotReadOnlyOpenWorld); ok {
+		roActions := []any{"list", "get_url", "remote_list"}
+		schema := jf.WithEnums[jf.ImagesInput](map[string][]any{
+			"action": {"list", "get_url", "remote_list", "remote_download", "upload"},
+		})
+		desc := fmt.Sprintf("List item artwork, build direct image URLs, browse/download remote provider artwork, or upload base64 images (max %d MiB).", maxUploadBytes>>20)
+		if ro {
+			schema = jf.WithEnumsFiltered[jf.ImagesInput](map[string][]any{"action": roActions}, []string{"action", "item_id", "image_type", "provider_name", "image_index"})
+			desc = "List item artwork, build direct image URLs, or browse remote provider artwork."
+		}
 		mcp.AddTool(server, &mcp.Tool{
-			Name:  "jellyfin_images",
-			Title: "Images",
-			InputSchema: jf.WithEnums[jf.ImagesInput](map[string][]any{
-				"action": {"list", "get_url", "remote_list", "remote_download", "upload"},
-			}),
-			Description: "Manage item images. Use 'list' to see all images for an item (types: Primary, Backdrop, Logo, Thumb, Banner). " +
-				"Use 'get_url' to get the direct URL for an item's image (useful for displaying or linking). " +
-				"Use 'remote_list' to browse available images from online providers like TheMovieDb. " +
-				"Use 'remote_download' to download a specific remote image URL and set it for the item. " +
-				fmt.Sprintf("Use 'upload' to set an image from base64-encoded data: a JPEG, PNG, WebP, GIF, or BMP file of at most %d MiB.", maxUploadBytes>>20),
-			Annotations: AnnotWriteOp,
+			Name:        "jellyfin_images",
+			Title:       "Images",
+			InputSchema: schema,
+			Description: desc,
+			Annotations: annot,
 		}, func(ctx context.Context, req *mcp.CallToolRequest, args jf.ImagesInput) (*mcp.CallToolResult, any, error) {
-			itemID := jf.SanitizeID(args.ItemID)
+			if ro {
+				if res := requireReadOnlyAction(args.Action, roActions); res != nil {
+					return res, nil, nil
+				}
+			}
+			itemID := jf.SanitizeID(strings.TrimSpace(args.ItemID))
 			imageType := args.ImageType
 			if imageType == "" {
 				imageType = "Primary"
 			}
 			if !slices.Contains(imageTypes, imageType) {
 				return jf.ErrResult("image_type %q is not a Jellyfin image type. Valid types: %s.", args.ImageType, strings.Join(imageTypes, ", ")), nil, nil
+			}
+			if slices.Contains([]string{"list", "get_url", "remote_list", "remote_download", "upload"}, args.Action) && itemID == "" {
+				return jf.ErrResult("item_id is required for %s.", args.Action), nil, nil
 			}
 
 			switch args.Action {
@@ -731,4 +879,147 @@ func externalSubtitleCount(ctx context.Context, client jf.Client, itemID string)
 		}
 	}
 	return n, nil
+}
+
+// inspectMergeVersions validates requested item IDs when possible and builds
+// the merge_versions confirmation prompt with item names and resolutions.
+func inspectMergeVersions(ctx context.Context, client jf.Client, ids []string) (string, *mcp.CallToolResult) {
+	labels := make(map[string]string, len(ids))
+	userID, _ := client.GetUserID(ctx)
+	params := url.Values{"Ids": {jf.JoinIDs(ids)}, "Fields": {"MediaStreams"}}
+	if userID != "" {
+		params.Set("UserId", userID)
+	}
+	var out struct {
+		Items []map[string]any `json:"Items"`
+	}
+	if err := client.Get(ctx, "/Items", params, &out); err != nil {
+		var apiErr *jf.APIError
+		if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusBadRequest || apiErr.StatusCode == http.StatusNotFound) {
+			return "", jf.ErrResultWithHint("Use jellyfin_search or jellyfin_browse to find valid item IDs first.", "Invalid item_ids: %v", err)
+		}
+	} else if out.Items != nil {
+		found := make(map[string]bool, len(out.Items))
+		for _, it := range out.Items {
+			id := jf.NormalizeID(jf.GetString(it, "Id"))
+			found[id] = true
+			name := jf.GetString(it, "Name")
+			if name == "" {
+				continue
+			}
+			if res := videoStreamLabel(jf.ToSlice(it["MediaStreams"])); res != "" {
+				name = fmt.Sprintf("%s [%s]", name, res)
+			}
+			labels[id] = name
+		}
+		for _, rawID := range ids {
+			if !found[jf.NormalizeID(rawID)] {
+				return "", jf.ErrResultWithHint("Use jellyfin_search or jellyfin_browse to find valid item IDs first.", "Item %q was not found.", rawID)
+			}
+		}
+	}
+	return fmt.Sprintf("Merge %s into alternate versions of one item? Jellyfin combines them under a single library entry (preferring a non-3D, highest-resolution version as primary).", nameList(ids, labels)), nil
+}
+
+func videoStreamLabel(streams []any) string {
+	for _, raw := range streams {
+		m := jf.ToMap(raw)
+		if jf.GetString(m, "Type") != "Video" {
+			continue
+		}
+		if title := jf.GetString(m, "DisplayTitle"); title != "" {
+			return title
+		}
+		w, h := jf.GetInt(m, "Width"), jf.GetInt(m, "Height")
+		if w > 0 && h > 0 {
+			return fmt.Sprintf("%dx%d", w, h)
+		}
+	}
+	return ""
+}
+
+func hasGroupedAlternateSource(item map[string]any) bool {
+	for _, raw := range jf.ToSlice(item["MediaSources"]) {
+		if m := jf.ToMap(raw); strings.EqualFold(jf.GetString(m, "Type"), "Grouping") {
+			return true
+		}
+	}
+	return len(jf.ToSlice(item["LinkedAlternateVersions"])) > 0
+}
+
+func inspectSplitVersions(ctx context.Context, client jf.Client, itemID string) (string, *mcp.CallToolResult) {
+	name := itemID
+	var item map[string]any
+	userID, _ := client.GetUserID(ctx)
+	params := url.Values{"Fields": {"MediaSources"}}
+	if userID != "" {
+		params.Set("UserId", userID)
+	}
+	if err := client.Get(ctx, "/Items/"+jf.SanitizeID(itemID), params, &item); err != nil {
+		var apiErr *jf.APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+			return "", jf.ErrResultWithHint("Use jellyfin_search to find the merged item ID.", "Item %q was not found.", itemID)
+		}
+		return fmt.Sprintf("Split the alternate versions of '%s' back into separate items?", name), nil
+	}
+	if n := jf.GetString(item, "Name"); n != "" {
+		name = n
+	}
+	// Jellyfin's BaseItemDto marks manually merged alternate versions with
+	// MediaSources[i].Type == "Grouping", whereas folder-grouped files in the
+	// same directory all report Type == "Default".
+	if item != nil && !hasGroupedAlternateSource(item) {
+		if len(jf.ToSlice(item["MediaSources"])) > 1 || jf.GetInt(item, "MediaSourceCount") > 1 {
+			return "", jf.ErrResult("'%s' has folder-grouped versions in the same directory rather than manually merged versions, so split_versions cannot separate them. Move the files into separate folders and scan the library instead.", name)
+		}
+		if item["MediaSources"] != nil || item["MediaSourceCount"] != nil {
+			return "", jf.ErrResult("'%s' has no merged alternate versions to split.", name)
+		}
+	}
+	return fmt.Sprintf("Split the alternate versions of '%s' back into separate items?", name), nil
+}
+
+func inspectSubtitleDeletion(ctx context.Context, client jf.Client, itemID string, subIndex int) (string, *mcp.CallToolResult) {
+	name := itemID
+	var item map[string]any
+	userID, _ := client.GetUserID(ctx)
+	params := url.Values{"Fields": {"MediaStreams"}}
+	if userID != "" {
+		params.Set("UserId", userID)
+	}
+	if err := client.Get(ctx, "/Items/"+jf.SanitizeID(itemID), params, &item); err != nil || item == nil {
+		var apiErr *jf.APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+			return "", jf.ErrResultWithHint("Use jellyfin_search or jellyfin_browse to find item IDs.", "Item %q was not found.", itemID)
+		}
+		return fmt.Sprintf("Delete external subtitle track %d from '%s'? Its subtitle file on disk is permanently removed.", subIndex, name), nil
+	}
+	if n := jf.GetString(item, "Name"); n != "" {
+		name = n
+	}
+	streams := jf.ToSlice(item["MediaStreams"])
+	if len(streams) == 0 {
+		return fmt.Sprintf("Delete external subtitle track %d from '%s'? Its subtitle file on disk is permanently removed.", subIndex, name), nil
+	}
+	for _, raw := range streams {
+		m := jf.ToMap(raw)
+		if jf.GetInt(m, "Index") != subIndex || jf.GetString(m, "Type") != "Subtitle" {
+			continue
+		}
+		if !jf.GetBool(m, "IsExternal") {
+			return "", jf.ErrResult("Subtitle track %d on '%s' is embedded inside the media file and cannot be deleted. Only external subtitle files (is_external=true in jellyfin_get_item) can be deleted.", subIndex, name)
+		}
+		var meta []string
+		if lang := jf.GetString(m, "Language"); lang != "" {
+			meta = append(meta, lang)
+		}
+		if codec := jf.GetString(m, "Codec"); codec != "" {
+			meta = append(meta, codec)
+		}
+		if len(meta) > 0 {
+			return fmt.Sprintf("Delete external subtitle track %d (%s) from '%s'? Its subtitle file on disk is permanently removed.", subIndex, strings.Join(meta, ", "), name), nil
+		}
+		return fmt.Sprintf("Delete external subtitle track %d from '%s'? Its subtitle file on disk is permanently removed.", subIndex, name), nil
+	}
+	return "", jf.ErrResult("Item '%s' has no subtitle track at index %d. Check subtitle_streams in jellyfin_get_item.", name, subIndex)
 }

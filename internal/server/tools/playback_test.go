@@ -145,9 +145,9 @@ func TestPlaybackControl_DisplayContent(t *testing.T) {
 		},
 	}
 
-	result := callTool(t, mc, "", "jellyfin_playback_control", map[string]any{
+	result := callTool(t, mc, "", "jellyfin_playback", map[string]any{
 		"session_id": "session-1",
-		"command":    "DisplayContent",
+		"action":     "DisplayContent",
 		"item_id":    "item-123",
 	})
 
@@ -183,9 +183,9 @@ func TestPlaybackControl_SetVolume(t *testing.T) {
 		},
 	}
 
-	result := callTool(t, mc, "", "jellyfin_playback_control", map[string]any{
+	result := callTool(t, mc, "", "jellyfin_playback", map[string]any{
 		"session_id": "session-1",
-		"command":    "SetVolume",
+		"action":     "SetVolume",
 		"volume":     35,
 	})
 
@@ -232,12 +232,12 @@ func TestPlaybackControl_SetVolumeValidation(t *testing.T) {
 					return nil
 				},
 			}
-			args := map[string]any{"session_id": "session-1", "command": "SetVolume"}
+			args := map[string]any{"session_id": "session-1", "action": "SetVolume"}
 			if tt.volume != nil {
 				args["volume"] = tt.volume
 			}
 
-			result := callTool(t, mc, "", "jellyfin_playback_control", args)
+			result := callTool(t, mc, "", "jellyfin_playback", args)
 
 			text := resultText(t, result)
 			if result.IsError != tt.wantErr {

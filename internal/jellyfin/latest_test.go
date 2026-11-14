@@ -36,4 +36,11 @@ func TestFetchLatest(t *testing.T) {
 	if got.Has("ParentId") {
 		t.Errorf("ParentId sent without a library: %v", got)
 	}
+
+	if _, err := FetchLatestForUser(context.Background(), c, "user-other", "library-2", 5); err != nil {
+		t.Fatal(err)
+	}
+	if got.Get("UserId") != "user-other" || got.Get("ParentId") != "library-2" || got.Get("Limit") != "5" {
+		t.Errorf("FetchLatestForUser query = %v", got)
+	}
 }

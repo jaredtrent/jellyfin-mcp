@@ -209,7 +209,7 @@ func TestUnansweredConfirmationFormGivesUp(t *testing.T) {
 	saved := elicitationTimeout
 	elicitationTimeout = 200 * time.Millisecond
 	t.Cleanup(func() { elicitationTimeout = saved })
-	restart := &mcp.CallToolParams{Name: "jellyfin_system_control", Arguments: map[string]any{"action": "restart"}}
+	restart := &mcp.CallToolParams{Name: "jellyfin_server", Arguments: map[string]any{"action": "restart"}}
 
 	// connect returns a legacy client whose user never answers a form, and a
 	// channel that receives when the form is shown.

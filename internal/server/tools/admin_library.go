@@ -2,7 +2,9 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 
@@ -14,25 +16,51 @@ import (
 func RegisterAdminLibraryTools(server *mcp.Server, client jf.Client, enabled func(string, *mcp.ToolAnnotations) bool) {
 
 	// --- jellyfin_library_manage ---
-	if enabled("jellyfin_library_manage", AnnotDestructive) {
+	full := enabled("jellyfin_library_manage", AnnotDestructive)
+	curate := !full && enabled("jellyfin_library_manage", annotCurateProbe)
+	ro := enabled("jellyfin_library_manage", AnnotReadOnly)
+	if full || curate || ro {
+		var allowedActions []any
+		var modeLabel string
+		schema := jf.WithEnums[jf.LibraryManageInput](map[string][]any{
+			"action": {"scan", "refresh_item", "delete_item", "list_folders", "add_folder", "remove_folder", "add_path", "remove_path", "rename_folder", "update_options", "browse_drives", "browse_directory"},
+		})
+		desc := "Scan libraries or changed server paths, refresh item metadata/images, delete items/files, configure virtual library folders and paths, or browse server drives/directories (admin). " +
+			"Use scan (empty for all libraries, item_id for immediate scan, or path for library-monitor change notice) for new/changed files; refresh_item re-fetches provider metadata/images."
+		annot := AnnotDestructive
+
+		switch {
+		case curate:
+			allowedActions = []any{"list_folders", "scan", "refresh_item"}
+			desc = "Inspect virtual library folders, scan libraries or changed server paths for new/updated media files, or refresh item metadata/images."
+			if ro {
+				allowedActions = append(allowedActions, "browse_drives", "browse_directory")
+				desc = "Inspect virtual library folders, browse server drives and directories, scan libraries or changed server paths, or refresh item metadata/images."
+			}
+			schema = jf.WithEnumsFiltered[jf.LibraryManageInput](
+				map[string][]any{"action": allowedActions},
+				[]string{"action", "item_id", "path", "replace_all_metadata", "replace_all_images", "confirm"},
+			)
+			modeLabel = "curator mode (allowed actions"
+		case !full && ro:
+			allowedActions = []any{"list_folders", "browse_drives", "browse_directory"}
+			schema = jf.WithEnumsFiltered[jf.LibraryManageInput](map[string][]any{"action": allowedActions}, []string{"action", "path"})
+			desc = "Inspect library virtual-folder configuration or browse server drives and directories (admin)."
+			annot = AnnotReadOnly
+			modeLabel = "read-only mode (allowed read-only actions"
+		}
 		mcp.AddTool(server, &mcp.Tool{
-			Name:  "jellyfin_library_manage",
-			Title: "Library Management",
-			InputSchema: jf.WithEnums[jf.LibraryManageInput](map[string][]any{
-				"action": {"scan", "refresh_item", "delete_item", "list_folders", "add_folder", "remove_folder", "add_path", "remove_path", "rename_folder", "update_options", "browse_drives", "browse_directory"},
-			}),
-			Description: "Manage media libraries: scan for new content, refresh metadata, delete items, and manage library folders/paths. " +
-				"Use 'scan' to find new, changed, and removed files. With no item_id or path it scans every library. " +
-				"With item_id it scans that library, folder, or item right away, as the dashboard's Scan Library does. " +
-				"With path, a file or folder as the Jellyfin server sees it, it reports that path as changed, which suits a download that just finished: after the server's library monitor delay, Jellyfin reads the nearest item that holds the path. " +
-				"Use 'refresh_item' to re-fetch metadata and images for an item. On a library or folder it re-fetches them for every item under it, so use 'scan' with that item_id when you want only new or changed files. " +
-				"Use 'delete_item' to permanently remove an item (destructive). Use 'list_folders' to see library configuration. " +
-				"Use 'add_folder'/'remove_folder' to create or delete libraries, and 'add_path'/'remove_path' to manage media paths within a library. " +
-				"When 'add_folder' is given a path, the new library starts with that media path and a library scan is requested. " +
-				"Use 'rename_folder' to rename a library. Use 'update_options' to set library options (use list_folders to see current options). " +
-				"Use 'browse_drives' to list server drives/mount points, or 'browse_directory' to browse the server filesystem (admin-only).",
-			Annotations: AnnotDestructive,
+			Name:        "jellyfin_library_manage",
+			Title:       "Library Management",
+			InputSchema: schema,
+			Description: desc,
+			Annotations: annot,
 		}, func(ctx context.Context, req *mcp.CallToolRequest, args jf.LibraryManageInput) (*mcp.CallToolResult, any, error) {
+			if len(allowedActions) > 0 {
+				if res := requireAllowedAction(args.Action, allowedActions, modeLabel); res != nil {
+					return res, nil, nil
+				}
+			}
 			switch args.Action {
 			case "scan":
 				switch {
@@ -51,12 +79,15 @@ func RegisterAdminLibraryTools(server *mcp.Server, client jf.Client, enabled fun
 					// sends: Jellyfin reads the files under the item again, and its
 					// providers run only for items that are new, changed, or due for
 					// a refresh.
+					targetID, err := jf.ResolveLibraryID(ctx, client, args.ItemID)
+					if err != nil {
+						return jf.ResolveErrResult(err), nil, nil
+					}
 					params := url.Values{
 						"MetadataRefreshMode": {"Default"},
 						"ImageRefreshMode":    {"Default"},
 					}
-					endpoint := fmt.Sprintf("/Items/%s/Refresh", jf.SanitizeID(args.ItemID))
-					if err := client.PostNoContent(ctx, endpoint, params, nil); err != nil {
+					if err := client.PostNoContent(ctx, fmt.Sprintf("/Items/%s/Refresh", jf.SanitizeID(targetID)), params, nil); err != nil {
 						return jf.ErrResult("Failed to start the scan: %v", err), nil, nil
 					}
 					return jf.TextResult("Scan started. Jellyfin reads the files under this item again: it adds new items, updates changed ones, and removes those whose files are gone. Metadata providers run only for new or changed items and for items due for a refresh. The scan runs in the background. When the item is a library, list_folders shows the scan's state as the library's RefreshStatus (Queued, Active, or Idle) and its percent complete as RefreshProgress."), nil, nil
@@ -122,6 +153,37 @@ func RegisterAdminLibraryTools(server *mcp.Server, client jf.Client, enabled fun
 				if args.ItemID == "" {
 					return jf.ErrResult("item_id is required for refresh_item."), nil, nil
 				}
+				replaceMeta := args.ReplaceMetadata != nil && *args.ReplaceMetadata
+				replaceImg := args.ReplaceImages != nil && *args.ReplaceImages
+				if replaceMeta || replaceImg {
+					if res := jf.DestructiveDisabledError(ctx); res != nil {
+						return res, nil, nil
+					}
+				}
+				targetID, err := jf.ResolveLibraryID(ctx, client, args.ItemID)
+				if err != nil {
+					return jf.ResolveErrResult(err), nil, nil
+				}
+				if replaceMeta || replaceImg {
+					name, itemType, _, isFolder, notFound := itemBrief(ctx, client, targetID)
+					if notFound {
+						return jf.ErrResultWithHint("Use jellyfin_search or jellyfin_browse to find item IDs.", "Item %q was not found.", args.ItemID), nil, nil
+					}
+					target := refreshScopeLabel(name, itemType, isFolder)
+					var overwrite string
+					switch {
+					case replaceMeta && replaceImg:
+						overwrite = "all existing metadata (including custom edits) and images"
+					case replaceMeta:
+						overwrite = "all existing metadata, including custom edits"
+					default:
+						overwrite = "all existing images"
+					}
+					warning := fmt.Sprintf("Refresh %s and overwrite %s?", target, overwrite)
+					if result := jf.DestructiveGate(ctx, req, args.Confirm, warning); result != nil {
+						return result, nil, nil
+					}
+				}
 				// Without a refresh mode Jellyfin runs no metadata provider, so
 				// both modes are always FullRefresh; the flags decide whether
 				// existing metadata and images are replaced or only filled in.
@@ -131,14 +193,13 @@ func RegisterAdminLibraryTools(server *mcp.Server, client jf.Client, enabled fun
 					"MetadataRefreshMode": {"FullRefresh"},
 					"ImageRefreshMode":    {"FullRefresh"},
 				}
-				if args.ReplaceMetadata != nil && *args.ReplaceMetadata {
+				if replaceMeta {
 					params.Set("ReplaceAllMetadata", "true")
 				}
-				if args.ReplaceImages != nil && *args.ReplaceImages {
+				if replaceImg {
 					params.Set("ReplaceAllImages", "true")
 				}
-				endpoint := fmt.Sprintf("/Items/%s/Refresh", jf.SanitizeID(args.ItemID))
-				if err := client.PostNoContent(ctx, endpoint, params, nil); err != nil {
+				if err := client.PostNoContent(ctx, fmt.Sprintf("/Items/%s/Refresh", jf.SanitizeID(targetID)), params, nil); err != nil {
 					return jf.ErrResult("Failed to refresh item: %v", err), nil, nil
 				}
 				return jf.TextResult("Item metadata refresh started."), nil, nil
@@ -147,8 +208,14 @@ func RegisterAdminLibraryTools(server *mcp.Server, client jf.Client, enabled fun
 				if args.ItemID == "" {
 					return jf.ErrResult("item_id is required for delete_item."), nil, nil
 				}
-				name := itemName(ctx, client, args.ItemID, "")
-				if result := jf.DestructiveGate(ctx, req, args.Confirm, fmt.Sprintf("Delete '%s' and its files permanently? There is no undo.", name)); result != nil {
+				if res := jf.DestructiveDisabledError(ctx); res != nil {
+					return res, nil, nil
+				}
+				name, itemType, itemPath, isFolder, notFound := itemBrief(ctx, client, args.ItemID)
+				if notFound {
+					return jf.ErrResultWithHint("Use jellyfin_search or jellyfin_browse to find item IDs.", "Item %q was not found.", args.ItemID), nil, nil
+				}
+				if result := jf.DestructiveGate(ctx, req, args.Confirm, deleteItemWarning(name, itemType, itemPath, isFolder)); result != nil {
 					return result, nil, nil
 				}
 				endpoint := fmt.Sprintf("/Items/%s", jf.SanitizeID(args.ItemID))
@@ -257,29 +324,48 @@ func RegisterAdminLibraryTools(server *mcp.Server, client jf.Client, enabled fun
 					return jf.ErrResult("folder_name is required for update_options. Use list_folders to find library names."), nil, nil
 				}
 				if args.LibraryOptions == nil {
-					return jf.ErrResult("library_options is required for update_options: the complete LibraryOptions object from list_folders, edited."), nil, nil
+					return jf.ErrResult("library_options is required for update_options: provide a JSON object of LibraryOptions fields to update (use list_folders to inspect current options)."), nil, nil
 				}
-				if result := jf.DestructiveGate(ctx, req, args.Confirm, fmt.Sprintf("Replace all options of library '%s' with the library_options given? Options it leaves out return to their defaults.", args.FolderName)); result != nil {
-					return result, nil, nil
+				if res := jf.DestructiveDisabledError(ctx); res != nil {
+					return res, nil, nil
 				}
-				// Find library ID from name
+				patch, ok := jf.AsConfigMap(args.LibraryOptions)
+				if !ok || len(patch) == 0 {
+					return jf.ErrResult("library_options must be a non-empty JSON object of LibraryOptions fields to update (use list_folders to inspect current options)."), nil, nil
+				}
 				var libs []map[string]any
 				if err := client.Get(ctx, "/Library/VirtualFolders", nil, &libs); err != nil {
 					return jf.ErrResult("Jellyfin API error: %v", err), nil, nil
 				}
 				var libID string
+				var current map[string]any
 				for _, lib := range libs {
 					if jf.GetString(lib, "Name") == args.FolderName {
 						libID = jf.GetString(lib, "ItemId")
+						current, _ = jf.AsConfigMap(lib["LibraryOptions"])
 						break
 					}
 				}
 				if libID == "" {
 					return jf.ErrResult("Library '%s' not found. Use list_folders to see available libraries.", args.FolderName), nil, nil
 				}
+				merged := jf.MergeConfig(current, patch)
+				changes := jf.DiffConfig(current, merged)
+				if len(current) > 0 && len(changes) == 0 {
+					return jf.TextResult(fmt.Sprintf("Library '%s' already has those options; nothing changed.", args.FolderName)), nil, nil
+				}
+				var warning string
+				if len(current) > 0 {
+					warning = fmt.Sprintf("Update options for library '%s'? Changes: %s. Other library options stay unchanged.", args.FolderName, jf.FormatConfigChanges(changes))
+				} else {
+					warning = fmt.Sprintf("Update options for library '%s'? Settings: %s.", args.FolderName, jf.FormatConfigChanges(changes))
+				}
+				if result := jf.DestructiveGate(ctx, req, args.Confirm, warning); result != nil {
+					return result, nil, nil
+				}
 				body := map[string]any{
 					"Id":             libID,
-					"LibraryOptions": args.LibraryOptions,
+					"LibraryOptions": merged,
 				}
 				if err := client.PostNoContent(ctx, "/Library/VirtualFolders/LibraryOptions", nil, body); err != nil {
 					return jf.ErrResult("Failed to update library options: %v", err), nil, nil
@@ -336,4 +422,85 @@ func pathUnder(path, folder string) (string, bool) {
 // starts with a drive letter or names a network share.
 func windowsPath(folder string) bool {
 	return strings.HasPrefix(folder, `\\`) || len(folder) >= 2 && folder[1] == ':'
+}
+
+// itemBrief looks up an item's name, Jellyfin type, filesystem path, and folder flag
+// for confirmation messages, falling back to itemID when the lookup fails and
+// reporting notFound when Jellyfin returns HTTP 404.
+func itemBrief(ctx context.Context, client jf.Client, itemID string) (name, itemType, itemPath string, isFolder, notFound bool) {
+	name = itemID
+	var item map[string]any
+	userID, _ := client.GetUserID(ctx)
+	params := url.Values{"Fields": {"Path"}}
+	if userID != "" {
+		params.Set("UserId", userID)
+	}
+	if err := client.Get(ctx, "/Items/"+jf.SanitizeID(itemID), params, &item); err != nil {
+		var apiErr *jf.APIError
+		return name, "", "", false, errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound
+	}
+	if n := jf.GetString(item, "Name"); n != "" {
+		name = n
+	}
+	itemType = jf.GetString(item, "Type")
+	itemPath = jf.GetString(item, "Path")
+	isFolder = jf.GetBool(item, "IsFolder")
+	return name, itemType, itemPath, isFolder, false
+}
+
+func itemTypeWord(itemType, fallback string) string {
+	switch itemType {
+	case "CollectionFolder", "UserView":
+		return "library"
+	case "BoxSet":
+		return "collection"
+	case "MusicAlbum":
+		return "album"
+	case "MusicArtist":
+		return "artist"
+	case "MusicVideo":
+		return "music video"
+	case "":
+		return fallback
+	default:
+		return strings.ToLower(itemType)
+	}
+}
+
+func refreshScopeLabel(name, itemType string, isFolder bool) string {
+	switch itemType {
+	case "CollectionFolder", "UserView":
+		return fmt.Sprintf("library '%s' and every item in it", name)
+	case "Series", "Season", "Folder", "BoxSet", "MusicAlbum", "MusicArtist":
+		return fmt.Sprintf("%s '%s' and every item under it", itemTypeWord(itemType, "folder"), name)
+	}
+	if isFolder {
+		return fmt.Sprintf("folder '%s' and every item under it", name)
+	}
+	if kind := itemTypeWord(itemType, ""); kind != "" {
+		return fmt.Sprintf("%s '%s'", kind, name)
+	}
+	return fmt.Sprintf("'%s'", name)
+}
+
+func deleteItemWarning(name, itemType, itemPath string, isFolder bool) string {
+	recursive := isFolder || itemType == "Series" || itemType == "Season" || itemType == "Folder"
+	if recursive {
+		kind := itemTypeWord(itemType, "folder")
+		if itemPath != "" {
+			return fmt.Sprintf("Delete %s '%s' and all media files under '%s' permanently? Every child item and its files on disk are deleted; there is no undo.", kind, name, itemPath)
+		}
+		return fmt.Sprintf("Delete %s '%s' and all child items and files permanently? There is no undo.", kind, name)
+	}
+	kind := itemTypeWord(itemType, "")
+	if itemPath != "" {
+		if kind != "" {
+			return fmt.Sprintf("Delete %s '%s' ('%s') permanently? Its file on disk is deleted and there is no undo.", kind, name, itemPath)
+		}
+		return fmt.Sprintf("Delete '%s' ('%s') permanently? Its file on disk is deleted and there is no undo.", name, itemPath)
+	}
+	if kind != "" {
+		return fmt.Sprintf("Delete %s '%s' and its files permanently? There is no undo.", kind, name)
+	}
+	return fmt.Sprintf("Delete '%s' and its files permanently? There is no undo.", name)
 }
