@@ -99,7 +99,8 @@ func TestConfirmationGate(t *testing.T) {
 		wantPerformed bool
 		wantElicited  int
 	}{
-		{name: "confirm=true skips the form", setup: clientSetup{answer: decline}, confirm: BoolPtr(true), wantText: "done", wantPerformed: true},
+		{name: "confirm=true does not skip form when elicitation is supported (declined)", setup: clientSetup{answer: decline}, confirm: BoolPtr(true), wantText: DeclinedText, wantElicited: 1},
+		{name: "confirm=true still elicits when elicitation is supported (accepted)", setup: clientSetup{answer: accept}, confirm: BoolPtr(true), wantText: "done", wantPerformed: true, wantElicited: 1},
 		{name: "confirm=false still asks", setup: clientSetup{answer: accept}, confirm: BoolPtr(false), wantText: "done", wantPerformed: true, wantElicited: 1},
 
 		{name: "current protocol: accept", setup: clientSetup{answer: accept}, wantText: "done", wantPerformed: true, wantElicited: 1},
@@ -108,11 +109,14 @@ func TestConfirmationGate(t *testing.T) {
 		{name: "current protocol: cancel", setup: clientSetup{answer: cancel}, wantText: DeclinedText, wantElicited: 1},
 		{name: "current protocol: decline carrying confirm", setup: clientSetup{answer: declineConfirming}, wantText: DeclinedText, wantElicited: 1},
 		{name: "current protocol: no elicitation", setup: clientSetup{noElicitation: true}, wantText: "CONFIRMATION REQUIRED"},
+		{name: "current protocol: no elicitation confirm=true proceeds", setup: clientSetup{noElicitation: true}, confirm: BoolPtr(true), wantText: "done", wantPerformed: true},
 
 		{name: "2025-11-25: accept", setup: clientSetup{protocolVersion: "2025-11-25", answer: accept}, wantText: "done", wantPerformed: true, wantElicited: 1},
+		{name: "2025-11-25: confirm=true still elicits", setup: clientSetup{protocolVersion: "2025-11-25", answer: decline}, confirm: BoolPtr(true), wantText: DeclinedText, wantElicited: 1},
 		{name: "2025-11-25: decline", setup: clientSetup{protocolVersion: "2025-11-25", answer: decline}, wantText: DeclinedText, wantElicited: 1},
 		{name: "2025-11-25: cancel", setup: clientSetup{protocolVersion: "2025-11-25", answer: cancel}, wantText: DeclinedText, wantElicited: 1},
 		{name: "2025-11-25: no elicitation", setup: clientSetup{protocolVersion: "2025-11-25", noElicitation: true}, wantText: "CONFIRMATION REQUIRED"},
+		{name: "2025-11-25: no elicitation confirm=true proceeds", setup: clientSetup{protocolVersion: "2025-11-25", noElicitation: true}, confirm: BoolPtr(true), wantText: "done", wantPerformed: true},
 
 		{
 			name: "URL-only elicitation gets the text warning",
@@ -120,6 +124,15 @@ func TestConfirmationGate(t *testing.T) {
 				Elicitation: &mcp.ElicitationCapabilities{URL: &mcp.URLElicitationCapabilities{}},
 			}},
 			wantText: "CONFIRMATION REQUIRED",
+		},
+		{
+			name: "URL-only elicitation confirm=true proceeds",
+			setup: clientSetup{answer: decline, capabilities: &mcp.ClientCapabilities{
+				Elicitation: &mcp.ElicitationCapabilities{URL: &mcp.URLElicitationCapabilities{}},
+			}},
+			confirm:       BoolPtr(true),
+			wantText:      "done",
+			wantPerformed: true,
 		},
 	}
 
@@ -333,5 +346,148 @@ func TestDestructiveGate(t *testing.T) {
 		if got != nil && len(got.InputRequests) != 0 {
 			t.Errorf("disabled with confirm=%v: asked for input %v", confirm, got.InputRequests)
 		}
+	}
+}
+
+func TestConfirmationLedgerBlocksPrematureAndTamperedConfirm(t *testing.T) {
+	ledger := NewConfirmationLedger(0)
+	ctx := WithConfirmationLedger(context.Background(), ledger)
+	req := &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "jellyfin_metadata"}}
+
+	// 1. Passing confirm=true on the first call (before any preview) is blocked and records the preview.
+	first := ConfirmationGate(ctx, req, BoolPtr(true), "Merge A and B?")
+	if first == nil || !strings.Contains(text(first), "CONFIRMATION REQUIRED") {
+		t.Fatalf("expected premature confirm=true to be blocked, got %+v", first)
+	}
+
+	// 2. Changing the target warning on the follow-up call is still blocked.
+	tampered := ConfirmationGate(ctx, req, BoolPtr(true), "Merge A and C?")
+	if tampered == nil || !strings.Contains(text(tampered), "CONFIRMATION REQUIRED") {
+		t.Fatalf("expected tampered warning to be blocked, got %+v", tampered)
+	}
+
+	// 3. Confirming the previously previewed warning succeeds once.
+	if ok := ConfirmationGate(ctx, req, BoolPtr(true), "Merge A and B?"); ok != nil {
+		t.Fatalf("expected previewed confirm=true to succeed, got %+v", ok)
+	}
+
+	// 4. Reusing the consumed confirmation requires a fresh preview.
+	replay := ConfirmationGate(ctx, req, BoolPtr(true), "Merge A and B?")
+	if replay == nil || !strings.Contains(text(replay), "CONFIRMATION REQUIRED") {
+		t.Fatalf("expected replayed confirm=true to require fresh confirmation, got %+v", replay)
+	}
+
+	// 5. Swapping masked/omitted arguments (such as password) while keeping identical warning text is blocked.
+	pwWarning := "Change the password for user 'User A'?"
+	pwPreviewReq := &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{
+		Name:      "jellyfin_users",
+		Arguments: []byte(`{"action":"update_password","user_id":"User A","password":"expected-pw"}`),
+	}}
+	if pre := ConfirmationGate(ctx, pwPreviewReq, nil, pwWarning); pre == nil || !strings.Contains(text(pre), "CONFIRMATION REQUIRED") {
+		t.Fatalf("expected password preview prompt, got %+v", pre)
+	}
+	pwSwappedReq := &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{
+		Name:      "jellyfin_users",
+		Arguments: []byte(`{"action":"update_password","user_id":"User A","password":"different-pw","confirm":true}`),
+	}}
+	if swapped := ConfirmationGate(ctx, pwSwappedReq, BoolPtr(true), pwWarning); swapped == nil || !strings.Contains(text(swapped), "CONFIRMATION REQUIRED") {
+		t.Fatalf("expected swapped password argument to be blocked, got %+v", swapped)
+	}
+	pwConfirmReq := &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{
+		Name:      "jellyfin_users",
+		Arguments: []byte(`{"password":"expected-pw","user_id":"User A","action":"update_password","confirm":true}`),
+	}}
+	if ok := ConfirmationGate(ctx, pwConfirmReq, BoolPtr(true), pwWarning); ok != nil {
+		t.Fatalf("expected matching canonical JSON arguments to confirm cleanly, got %+v", ok)
+	}
+}
+
+func TestMergeDiffAndFormatConfig(t *testing.T) {
+	base := map[string]any{
+		"EnableEmbeddedTitles":     false,
+		"EnableRealtimeMonitor":    true,
+		"DisabledSubtitleFetchers": []any{"Subtitle Provider A"},
+		"Nested": map[string]any{
+			"Keep":   "same",
+			"Change": 1,
+		},
+		"ApiKey":     "old-secret",
+		"WebhookUrl": "https://user:pass@example.com/hook?token=abc",
+	}
+	patch := map[string]any{
+		"enableembeddedtitles": true,
+		"Nested": map[string]any{
+			"Change": 2,
+		},
+		"ApiKey":     "new-secret",
+		"WebhookUrl": "https://hooks.example.com/v1/notify?key=xyz",
+	}
+
+	merged := MergeConfig(base, patch)
+	if merged["EnableEmbeddedTitles"] != true {
+		t.Fatalf("expected case-insensitive merge onto EnableEmbeddedTitles, got %+v", merged)
+	}
+	if _, stray := merged["enableembeddedtitles"]; stray {
+		t.Fatalf("unexpected duplicate lowercase key in %+v", merged)
+	}
+	if merged["EnableRealtimeMonitor"] != true {
+		t.Errorf("unmentioned field was dropped: %+v", merged)
+	}
+	nested, _ := AsConfigMap(merged["Nested"])
+	if nested["Keep"] != "same" || nested["Change"] != 2 {
+		t.Errorf("nested merge = %+v", nested)
+	}
+
+	changes := DiffConfig(base, merged)
+	formatted := FormatConfigChanges(changes)
+	for _, want := range []string{
+		`ApiKey: (hidden) -> (hidden)`,
+		`EnableEmbeddedTitles: false -> true`,
+		`Nested.Change: 1 -> 2`,
+		`WebhookUrl: "https://example.com/…" -> "https://hooks.example.com/…"`,
+	} {
+		if !strings.Contains(formatted, want) {
+			t.Errorf("FormatConfigChanges = %q, want %q", formatted, want)
+		}
+	}
+	for _, secret := range []string{"old-secret", "new-secret", "pass", "token=abc", "key=xyz"} {
+		if strings.Contains(formatted, secret) {
+			t.Errorf("FormatConfigChanges leaked %q in %q", secret, formatted)
+		}
+	}
+
+	// Clearing a non-empty nested map to {} reports the wiped map rather than 0 changes.
+	wiped := MergeConfig(base, map[string]any{"Nested": map[string]any{}})
+	wipedFormatted := FormatConfigChanges(DiffConfig(base, wiped))
+	if !strings.Contains(wipedFormatted, "Nested: 2 fields -> {}") {
+		t.Errorf("clearing nested map = %q, want 'Nested: 2 fields -> {}'", wipedFormatted)
+	}
+
+	// Non-string secrets (slices/maps) and URLs with credentials/queries on non-*Url keys are sanitized.
+	secretAndURL := FormatConfigChanges(DiffConfig(nil, map[string]any{
+		"ApiKeys":      []any{"placeholder-key-1", "placeholder-key-2"},
+		"TunerAddress": "http://admin:placeholder-pw@192.0.2.50/lineup.m3u?token=placeholder-token",
+	}))
+	if !strings.Contains(secretAndURL, "ApiKeys: (hidden)") || !strings.Contains(secretAndURL, `TunerAddress: "http://192.0.2.50/…"`) {
+		t.Errorf("secret slice / credential URL format = %q", secretAndURL)
+	}
+	for _, leak := range []string{"placeholder-key", "placeholder-pw", "placeholder-token"} {
+		if strings.Contains(secretAndURL, leak) {
+			t.Errorf("FormatConfigChanges leaked %q in %q", leak, secretAndURL)
+		}
+	}
+
+	// More than 6 changes truncates cleanly.
+	many := map[string]any{"a": 1, "b": 2, "c": 3, "d": 4, "e": 5, "f": 6, "g": 7, "h": 8}
+	manyText := FormatConfigChanges(DiffConfig(nil, many))
+	if !strings.Contains(manyText, "and 2 more") {
+		t.Errorf("expected truncation suffix, got %q", manyText)
+	}
+
+	if s, ok := AsSlice([]any{}); !ok || len(s) != 0 {
+		t.Errorf("AsSlice([]) = %v, %v; want empty slice, true", s, ok)
+	}
+	if _, ok := AsSlice("not-a-slice"); ok {
+		t.Error("AsSlice(string) = true, want false")
 	}
 }

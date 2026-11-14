@@ -1234,12 +1234,12 @@ func TestFormatJSON(t *testing.T) {
 		{
 			name: "map",
 			v:    map[string]any{"key": "value"},
-			want: "{\n  \"key\": \"value\"\n}",
+			want: `{"key":"value"}`,
 		},
 		{
 			name: "slice",
 			v:    []string{"a", "b"},
-			want: "[\n  \"a\",\n  \"b\"\n]",
+			want: `["a","b"]`,
 		},
 		{
 			name: "string",
@@ -1259,7 +1259,7 @@ func TestFormatJSON(t *testing.T) {
 		{
 			name: "nested map",
 			v:    map[string]any{"outer": map[string]any{"inner": "value"}},
-			want: "{\n  \"outer\": {\n    \"inner\": \"value\"\n  }\n}",
+			want: `{"outer":{"inner":"value"}}`,
 		},
 		{
 			name: "invalid value (channel)",

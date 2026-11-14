@@ -153,7 +153,7 @@ func TestUserData_GetUserData(t *testing.T) {
 	if q := gotParams.Encode(); q != "UserId=test-user-id" {
 		t.Errorf("query = %q, want UserId=test-user-id", q)
 	}
-	if !strings.Contains(text, `"play_count": 3`) {
+	if !strings.Contains(text, `"play_count":3`) {
 		t.Errorf("expected play_count in result, got: %s", text)
 	}
 }
@@ -220,6 +220,45 @@ func TestUserData_SetUserData(t *testing.T) {
 	}
 	if played, _ := gotBody["Played"].(bool); !played {
 		t.Errorf("body = %v, want Played=true", gotBody)
+	}
+}
+
+func TestUserData_SetUserDataPromptNamesItemUserAndFormattedFields(t *testing.T) {
+	posts := 0
+	mc := &mockClient{
+		getFunc: func(_ context.Context, endpoint string, _ url.Values, dest any) error {
+			switch endpoint {
+			case "/Items/item-123":
+				return jsonInto(map[string]any{"Name": "Test Movie"}, dest)
+			case "/Users/test-user-id":
+				return jsonInto(map[string]any{"Name": "User A"}, dest)
+			}
+			return nil
+		},
+		postNoContentFunc: func(context.Context, string, url.Values, any) error {
+			posts++
+			return nil
+		},
+	}
+
+	res := callTool(t, mc, "", "jellyfin_user_data", map[string]any{
+		"action":         "set_user_data",
+		"item_id":        "item-123",
+		"played":         false,
+		"position_ticks": int64(600 * 10_000_000),
+	})
+	text := resultText(t, res)
+	for _, want := range []string{
+		"CONFIRMATION REQUIRED",
+		"Update play state of 'Test Movie' for user 'User A' (played=false, position=00:10:00)?",
+		"Other play state fields stay unchanged.",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing %q in %s", want, text)
+		}
+	}
+	if posts != 0 {
+		t.Errorf("posts = %d, want 0 without confirmation", posts)
 	}
 }
 

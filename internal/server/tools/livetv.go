@@ -14,30 +14,37 @@ import (
 func RegisterLiveTVTools(server *mcp.Server, client jf.Client, enabled func(string, *mcp.ToolAnnotations) bool) {
 
 	// --- jellyfin_live_tv ---
-	if enabled("jellyfin_live_tv", AnnotReadOnly) {
+	if ok, ro, annot := toolMode(enabled, "jellyfin_live_tv", AnnotDestructive, AnnotReadOnly); ok {
+		roActions := []any{"channels", "channel", "programs", "recommended", "guide_info", "tuners", "recordings", "timers", "series_timers"}
+		schema := jf.WithEnums[jf.LiveTVInput](map[string][]any{
+			"action": {"channels", "channel", "programs", "recommended", "guide_info", "tuners", "recordings", "delete_recording", "timers", "create_timer", "cancel_timer", "series_timers", "create_series_timer", "cancel_series_timer"},
+		})
+		desc := "Browse Live TV channels, program guide, and tuners, or manage DVR recordings and one-time/series timers."
+		if ro {
+			schema = jf.WithEnumsFiltered[jf.LiveTVInput](map[string][]any{"action": roActions}, []string{"action", "channel_id", "limit"})
+			desc = "Browse Live TV channels, program guide, tuners, DVR recordings, and scheduled timers."
+		}
 		mcp.AddTool(server, &mcp.Tool{
-			Name:  "jellyfin_live_tv",
-			Title: "Live TV",
-			InputSchema: jf.WithEnums[jf.LiveTVInput](map[string][]any{
-				"action": {"channels", "channel", "programs", "recommended", "guide_info", "tuners"},
-			}),
-			Description: "Browse live TV channels and program guide. Use 'channels' to list available channels, 'channel' for details on a specific channel. " +
-				"Use 'programs' to see current and upcoming programs (optionally filter by channel_id). " +
-				"Use 'recommended' for recommended programs. Use 'guide_info' for TV guide metadata and date ranges. " +
-				"Use 'tuners' to list the configured tuner hosts. Requires Live TV to be set up with a tuner and guide data source.",
-			Annotations: AnnotReadOnly,
+			Name:        "jellyfin_live_tv",
+			Title:       "Live TV & DVR",
+			InputSchema: schema,
+			Description: desc,
+			Annotations: annot,
 		}, func(ctx context.Context, req *mcp.CallToolRequest, args jf.LiveTVInput) (*mcp.CallToolResult, any, error) {
-			userID, err := client.GetUserID(ctx)
-			if err != nil {
-				return jf.ErrResult("Jellyfin error: %v", err), nil, nil
+			if ro {
+				if res := requireReadOnlyAction(args.Action, roActions); res != nil {
+					return res, nil, nil
+				}
 			}
 
 			switch args.Action {
 			case "channels":
-				maxItems := jf.ClampInt(args.Limit, 500, jf.MaxLimitCap)
-				params := url.Values{
-					"UserId": {userID},
+				userID, err := client.GetUserID(ctx)
+				if err != nil {
+					return jf.ErrResult("Jellyfin error: %v", err), nil, nil
 				}
+				maxItems := jf.ClampInt(args.Limit, 100, jf.MaxLimitCap)
+				params := url.Values{"UserId": {userID}}
 				rawItems, total, err := jf.FetchAllPages(ctx, client, "/LiveTv/Channels", params, maxItems)
 				if err != nil {
 					return jf.ErrResult("Jellyfin API error: %v", err), nil, nil
@@ -49,6 +56,10 @@ func RegisterLiveTVTools(server *mcp.Server, client jf.Client, enabled func(stri
 				if args.ChannelID == "" {
 					return jf.ErrResult("channel_id is required. Use 'channels' to find IDs."), nil, nil
 				}
+				userID, err := client.GetUserID(ctx)
+				if err != nil {
+					return jf.ErrResult("Jellyfin error: %v", err), nil, nil
+				}
 				var channel map[string]any
 				endpoint := fmt.Sprintf("/LiveTv/Channels/%s", jf.SanitizeID(args.ChannelID))
 				params := url.Values{"UserId": {userID}}
@@ -58,10 +69,12 @@ func RegisterLiveTVTools(server *mcp.Server, client jf.Client, enabled func(stri
 				return jf.TextResult(jf.FormatJSON(jf.LocalizeInstants(channel, "StartDate", "EndDate"))), nil, nil
 
 			case "programs":
-				maxItems := jf.ClampInt(args.Limit, 200, jf.MaxLimitCap)
-				params := url.Values{
-					"UserId": {userID},
+				userID, err := client.GetUserID(ctx)
+				if err != nil {
+					return jf.ErrResult("Jellyfin error: %v", err), nil, nil
 				}
+				maxItems := jf.ClampInt(args.Limit, 50, jf.MaxLimitCap)
+				params := url.Values{"UserId": {userID}}
 				if args.ChannelID != "" {
 					params.Set("ChannelIds", args.ChannelID)
 				}
@@ -73,10 +86,12 @@ func RegisterLiveTVTools(server *mcp.Server, client jf.Client, enabled func(stri
 				return jf.TextResult(fmt.Sprintf("Programs (%d):%s\n\n%s", len(items), noteText(moreNote(len(items), total, maxItems, "pass a channel_id")), jf.FormatJSON(items))), nil, nil
 
 			case "recommended":
-				maxItems := jf.ClampInt(args.Limit, 100, jf.MaxLimitCap)
-				params := url.Values{
-					"UserId": {userID},
+				userID, err := client.GetUserID(ctx)
+				if err != nil {
+					return jf.ErrResult("Jellyfin error: %v", err), nil, nil
 				}
+				maxItems := jf.ClampInt(args.Limit, 25, jf.MaxLimitCap)
+				params := url.Values{"UserId": {userID}}
 				rawItems, total, err := jf.FetchAllPages(ctx, client, "/LiveTv/Programs/Recommended", params, maxItems)
 				if err != nil {
 					return jf.ErrResult("Jellyfin API error: %v", err), nil, nil
@@ -112,40 +127,28 @@ func RegisterLiveTVTools(server *mcp.Server, client jf.Client, enabled func(stri
 				}
 				return jf.TextResult(fmt.Sprintf("Configured tuner hosts (%d):\n\n%s", len(config.TunerHosts), jf.FormatJSON(config.TunerHosts))), nil, nil
 
-			default:
-				return jf.ErrResult("Invalid action '%s'. Valid actions: channels, channel, programs, recommended, guide_info, tuners", args.Action), nil, nil
-			}
-		})
-	}
-
-	// --- jellyfin_recordings ---
-	if enabled("jellyfin_recordings", AnnotDestructive) {
-		mcp.AddTool(server, &mcp.Tool{
-			Name:  "jellyfin_recordings",
-			Title: "DVR Recordings",
-			InputSchema: jf.WithEnums[jf.RecordingsInput](map[string][]any{
-				"action": {"list", "delete", "timers", "create_timer", "cancel_timer", "series_timers", "create_series_timer", "cancel_series_timer"},
-			}),
-			Description: "Manage DVR recordings and timers. Use 'list' to see existing recordings, 'delete' to remove one (destructive). " +
-				"Use 'timers' to see scheduled one-time recordings, 'create_timer' to schedule a recording from a program_id, 'cancel_timer' to cancel one. " +
-				"Use 'series_timers' to see series recording rules, 'create_series_timer' to record all episodes of a series, 'cancel_series_timer' to cancel. " +
-				"Requires Live TV with DVR capability configured.",
-			Annotations: AnnotDestructive,
-		}, func(ctx context.Context, req *mcp.CallToolRequest, args jf.RecordingsInput) (*mcp.CallToolResult, any, error) {
-			switch args.Action {
-			case "list":
+			case "recordings":
+				maxItems := jf.ClampInt(args.Limit, 25, jf.MaxLimitCap)
 				var result map[string]any
 				if err := client.Get(ctx, "/LiveTv/Recordings", nil, &result); err != nil {
 					return jf.ErrResult("Jellyfin API error: %v", err), nil, nil
 				}
 				items := jf.ItemsFrom(result)
-				return jf.TextResult(fmt.Sprintf("Recordings (%d):\n\n%s", len(items), jf.FormatJSON(items))), nil, nil
+				total := max(jf.GetInt(result, "TotalRecordCount"), len(items))
+				if len(items) > maxItems {
+					items = items[:maxItems]
+				}
+				return jf.TextResult(fmt.Sprintf("Recordings (%d):%s\n\n%s", len(items), noteText(moreNote(len(items), total, maxItems, "")), jf.FormatJSON(items))), nil, nil
 
-			case "delete":
+			case "delete_recording":
 				if args.RecordingID == "" {
 					return jf.ErrResult("recording_id is required."), nil, nil
 				}
-				if result := jf.DestructiveGate(ctx, req, args.Confirm, fmt.Sprintf("Delete recording '%s' permanently? Its file is removed from the server.", args.RecordingID)); result != nil {
+				if res := jf.DestructiveDisabledError(ctx); res != nil {
+					return res, nil, nil
+				}
+				recLabel := recordingLabel(ctx, client, args.RecordingID)
+				if result := jf.DestructiveGate(ctx, req, args.Confirm, fmt.Sprintf("Delete recording '%s' permanently? Its recording file is removed from the server.", recLabel)); result != nil {
 					return result, nil, nil
 				}
 				endpoint := fmt.Sprintf("/LiveTv/Recordings/%s", jf.SanitizeID(args.RecordingID))
@@ -163,7 +166,7 @@ func RegisterLiveTVTools(server *mcp.Server, client jf.Client, enabled func(stri
 
 			case "create_timer":
 				if args.ProgramID == "" {
-					return jf.ErrResult("program_id is required. Use jellyfin_live_tv 'programs' to find program IDs."), nil, nil
+					return jf.ErrResult("program_id is required. Use 'programs' to find program IDs."), nil, nil
 				}
 				params := url.Values{"programId": {args.ProgramID}}
 				var defaults map[string]any
@@ -179,7 +182,11 @@ func RegisterLiveTVTools(server *mcp.Server, client jf.Client, enabled func(stri
 				if args.TimerID == "" {
 					return jf.ErrResult("timer_id is required. Use 'timers' to find timer IDs."), nil, nil
 				}
-				if result := jf.DestructiveGate(ctx, req, args.Confirm, fmt.Sprintf("Cancel recording timer '%s'? The program is not recorded.", args.TimerID)); result != nil {
+				if res := jf.DestructiveDisabledError(ctx); res != nil {
+					return res, nil, nil
+				}
+				tLabel := timerLabel(ctx, client, "/LiveTv/Timers/"+jf.SanitizeID(args.TimerID), args.TimerID)
+				if result := jf.DestructiveGate(ctx, req, args.Confirm, fmt.Sprintf("Cancel scheduled recording timer %s? The program will not be recorded.", tLabel)); result != nil {
 					return result, nil, nil
 				}
 				endpoint := fmt.Sprintf("/LiveTv/Timers/%s", jf.SanitizeID(args.TimerID))
@@ -218,7 +225,11 @@ func RegisterLiveTVTools(server *mcp.Server, client jf.Client, enabled func(stri
 				if args.TimerID == "" {
 					return jf.ErrResult("timer_id is required. Use 'series_timers' to find IDs."), nil, nil
 				}
-				if result := jf.DestructiveGate(ctx, req, args.Confirm, fmt.Sprintf("Cancel series recording rule '%s'? Future episodes are not recorded.", args.TimerID)); result != nil {
+				if res := jf.DestructiveDisabledError(ctx); res != nil {
+					return res, nil, nil
+				}
+				stLabel := timerLabel(ctx, client, "/LiveTv/SeriesTimers/"+jf.SanitizeID(args.TimerID), args.TimerID)
+				if result := jf.DestructiveGate(ctx, req, args.Confirm, fmt.Sprintf("Cancel series recording rule %s? Future episodes will not be recorded.", stLabel)); result != nil {
 					return result, nil, nil
 				}
 				endpoint := fmt.Sprintf("/LiveTv/SeriesTimers/%s", jf.SanitizeID(args.TimerID))
@@ -228,7 +239,7 @@ func RegisterLiveTVTools(server *mcp.Server, client jf.Client, enabled func(stri
 				return jf.TextResult("Series recording rule cancelled."), nil, nil
 
 			default:
-				return jf.ErrResult("Invalid action '%s'. Valid actions: list, delete, timers, create_timer, cancel_timer, series_timers, create_series_timer, cancel_series_timer", args.Action), nil, nil
+				return jf.ErrResult("Invalid action '%s'. Valid actions: channels, channel, programs, recommended, guide_info, tuners, recordings, delete_recording, timers, create_timer, cancel_timer, series_timers, create_series_timer, cancel_series_timer", args.Action), nil, nil
 			}
 		})
 	}
@@ -307,4 +318,37 @@ func redactLiveTVConfig(config any) {
 			}
 		}
 	}
+}
+
+func recordingLabel(ctx context.Context, client jf.Client, recordingID string) string {
+	var rec map[string]any
+	if err := client.Get(ctx, "/LiveTv/Recordings/"+jf.SanitizeID(recordingID), nil, &rec); err == nil {
+		if name := jf.GetString(rec, "Name"); name != "" {
+			if ep := jf.GetString(rec, "EpisodeTitle"); ep != "" && ep != name {
+				return name + " - " + ep
+			}
+			return name
+		}
+	}
+	return recordingID
+}
+
+func timerLabel(ctx context.Context, client jf.Client, endpoint, fallbackID string) string {
+	var timer map[string]any
+	if err := client.Get(ctx, endpoint, nil, &timer); err == nil {
+		if name := jf.GetString(timer, "Name"); name != "" {
+			var details []string
+			if ch := jf.GetString(timer, "ChannelName"); ch != "" {
+				details = append(details, ch)
+			}
+			if start := jf.LocalDateTime(jf.GetString(timer, "StartDate")); start != "" {
+				details = append(details, start)
+			}
+			if len(details) > 0 {
+				return fmt.Sprintf("'%s' (%s)", name, strings.Join(details, ", "))
+			}
+			return fmt.Sprintf("'%s'", name)
+		}
+	}
+	return fmt.Sprintf("'%s'", fallbackID)
 }

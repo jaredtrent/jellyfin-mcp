@@ -47,7 +47,7 @@ func TestRecordings_CreateSeriesTimer_PostsTimerDefaults(t *testing.T) {
 		},
 	}
 
-	result := callTool(t, mc, "", "jellyfin_recordings", map[string]any{
+	result := callTool(t, mc, "", "jellyfin_live_tv", map[string]any{
 		"action":     "create_series_timer",
 		"program_id": "program-1",
 	})
@@ -91,7 +91,7 @@ func TestRecordings_CreateSeriesTimer_DefaultsErrorStopsCreation(t *testing.T) {
 		},
 	}
 
-	result := callTool(t, mc, "", "jellyfin_recordings", map[string]any{
+	result := callTool(t, mc, "", "jellyfin_live_tv", map[string]any{
 		"action":     "create_series_timer",
 		"program_id": "program-1",
 	})
@@ -227,13 +227,44 @@ func TestLiveTV_ProgramAndTimerTimesInServerZone(t *testing.T) {
 		return nil
 	}}
 	programs := resultText(t, callTool(t, mc, "", "jellyfin_live_tv", map[string]any{"action": "programs"}))
-	for _, want := range []string{`"start_time": "2026-01-02T18:00:00-05:00"`, `"end_time": "2026-01-02T18:30:00-05:00"`, `"channel_name": "Channel 4"`} {
+	for _, want := range []string{`"start_time":"2026-01-02T18:00:00-05:00"`, `"end_time":"2026-01-02T18:30:00-05:00"`, `"channel_name":"Channel 4"`} {
 		if !strings.Contains(programs, want) {
 			t.Errorf("programs missing %s:\n%s", want, programs)
 		}
 	}
-	timers := resultText(t, callTool(t, mc, "", "jellyfin_recordings", map[string]any{"action": "timers"}))
-	if !strings.Contains(timers, `"StartDate": "2026-01-02T18:00:00-05:00"`) || strings.Contains(timers, "23:00:00") {
+	timers := resultText(t, callTool(t, mc, "", "jellyfin_live_tv", map[string]any{"action": "timers"}))
+	if !strings.Contains(timers, `"StartDate":"2026-01-02T18:00:00-05:00"`) || strings.Contains(timers, "23:00:00") {
 		t.Errorf("timers not in the server zone:\n%s", timers)
+	}
+}
+
+func TestRecordings_DestructivePromptsIdentifyTarget(t *testing.T) {
+	mc := &mockClient{
+		getFunc: func(_ context.Context, endpoint string, _ url.Values, dest any) error {
+			switch endpoint {
+			case "/LiveTv/Recordings/rec-1":
+				return jsonInto(map[string]any{"Name": "Evening Talk", "EpisodeTitle": "Pilot"}, dest)
+			case "/LiveTv/Timers/timer-1":
+				return jsonInto(map[string]any{"Name": "Morning News", "ChannelName": "Channel 7"}, dest)
+			case "/LiveTv/SeriesTimers/st-1":
+				return jsonInto(map[string]any{"Name": "Quiz Show", "ChannelName": "Channel 4"}, dest)
+			}
+			return nil
+		},
+	}
+
+	delRes := callTool(t, mc, "", "jellyfin_live_tv", map[string]any{"action": "delete_recording", "recording_id": "rec-1"})
+	if text := resultText(t, delRes); !strings.Contains(text, "Delete recording 'Evening Talk - Pilot' permanently?") {
+		t.Errorf("delete prompt = %s", text)
+	}
+
+	timerRes := callTool(t, mc, "", "jellyfin_live_tv", map[string]any{"action": "cancel_timer", "timer_id": "timer-1"})
+	if text := resultText(t, timerRes); !strings.Contains(text, "Cancel scheduled recording timer 'Morning News' (Channel 7)?") {
+		t.Errorf("cancel_timer prompt = %s", text)
+	}
+
+	seriesRes := callTool(t, mc, "", "jellyfin_live_tv", map[string]any{"action": "cancel_series_timer", "timer_id": "st-1"})
+	if text := resultText(t, seriesRes); !strings.Contains(text, "Cancel series recording rule 'Quiz Show' (Channel 4)?") {
+		t.Errorf("cancel_series_timer prompt = %s", text)
 	}
 }

@@ -101,7 +101,7 @@ func TestAnalytics_PlayedStatus_NamesUnreadUsers(t *testing.T) {
 		}
 		return nil
 	}}
-	out := structured[jf.AnalyticsOutput](t, callTool(t, mc, "", "jellyfin_analytics", map[string]any{"action": "played_status", "item_id": "m1"}))
+	out := structured[jf.PlaybackStatsOutput](t, callTool(t, mc, "", "jellyfin_playback_stats", map[string]any{"action": "played_status", "item_id": "m1"}))
 	if len(out.Notes) != 1 || !strings.Contains(out.Notes[0], "User B") || strings.Contains(out.Notes[0], "User A") {
 		t.Errorf("notes = %q, want a note naming only User B", out.Notes)
 	}

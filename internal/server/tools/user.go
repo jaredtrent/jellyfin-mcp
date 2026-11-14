@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"net/url"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -14,27 +15,33 @@ import (
 func RegisterUserTools(server *mcp.Server, client jf.Client, enabled func(string, *mcp.ToolAnnotations) bool) {
 
 	// --- jellyfin_user_data ---
-	if enabled("jellyfin_user_data", AnnotWriteOp) {
+	if ok, ro, annot := toolMode(enabled, "jellyfin_user_data", AnnotWriteOp, AnnotReadOnly); ok {
+		roActions := []any{"get_user_data"}
+		schema := jf.WithEnums[jf.UserDataInput](map[string][]any{
+			"action": {"favorite", "unfavorite", "like", "dislike", "clear_rating", "mark_played", "mark_unplayed", "rate", "get_user_data", "set_user_data"},
+		})
+		desc := "Read or update per-user item state: favorites, like/dislike or 0-10 ratings, played status, play count, and playback position."
+		if ro {
+			schema = jf.WithEnumsFiltered[jf.UserDataInput](map[string][]any{"action": roActions}, []string{"action", "item_id", "user_id"})
+			desc = "Read per-user item state: played status, play count, rating, favorite flag, and resume position."
+		}
 		mcp.AddTool(server, &mcp.Tool{
-			Name:  "jellyfin_user_data",
-			Title: "User Interactions",
-			InputSchema: jf.WithEnums[jf.UserDataInput](map[string][]any{
-				"action": {"favorite", "unfavorite", "like", "dislike", "clear_rating", "mark_played", "mark_unplayed", "rate", "get_user_data", "set_user_data"},
-			}),
-			Description: "Manage user interactions with media items: toggle favorites, set ratings (like/dislike), and mark items as played or unplayed. " +
-				"Use 'favorite' or 'unfavorite' to manage the favorites list. Use 'like' or 'dislike' to rate items, or 'clear_rating' to remove a rating. " +
-				"Use 'mark_played' to set the played flag on a movie or episode, or 'mark_unplayed' to clear it. " +
-				"Use 'rate' with a numeric rating (0-10) for precise scoring. " +
-				"Use 'get_user_data' to read play count, position, rating, and played status. " +
-				"Use 'set_user_data' to write play state fields (asks the user to confirm). " +
-				"The item_id must come from a previous search, browse, or recommendations result.",
-			Annotations: AnnotWriteOp,
+			Name:        "jellyfin_user_data",
+			Title:       "User Interactions",
+			InputSchema: schema,
+			Description: desc,
+			Annotations: annot,
 		}, func(ctx context.Context, req *mcp.CallToolRequest, args jf.UserDataInput) (*mcp.CallToolResult, any, error) {
+			if ro {
+				if res := requireReadOnlyAction(args.Action, roActions); res != nil {
+					return res, nil, nil
+				}
+			}
 			userID, err := client.GetUserID(ctx)
 			if err != nil {
 				return jf.ErrResult("Jellyfin error: %v", err), nil, nil
 			}
-			itemID := jf.SanitizeID(args.ItemID)
+			itemID := jf.SanitizeID(strings.TrimSpace(args.ItemID))
 
 			type simpleAction struct {
 				pathFmt    string
@@ -53,6 +60,12 @@ func RegisterUserTools(server *mcp.Server, client jf.Client, enabled func(string
 				"mark_unplayed": {"/UserPlayedItems/%s", true, nil, "Item marked as unplayed.", "mark as unplayed"},
 			}
 			if act, ok := simpleActions[args.Action]; ok {
+				if strings.TrimSpace(args.UserID) != "" {
+					return jf.ErrResult("user_id is only supported for get_user_data; write actions update the configured user's own item state (omit user_id)."), nil, nil
+				}
+				if itemID == "" {
+					return jf.ErrResult("item_id is required for %s.", args.Action), nil, nil
+				}
 				endpoint := fmt.Sprintf(act.pathFmt, itemID)
 				params := make(url.Values, len(act.params)+1)
 				maps.Copy(params, act.params)
@@ -71,8 +84,14 @@ func RegisterUserTools(server *mcp.Server, client jf.Client, enabled func(string
 
 			switch args.Action {
 			case "rate":
+				if strings.TrimSpace(args.UserID) != "" {
+					return jf.ErrResult("user_id is only supported for get_user_data; write actions update the configured user's own item state (omit user_id)."), nil, nil
+				}
 				if args.Rating == nil {
 					return jf.ErrResult("rating is required (0.0-10.0)."), nil, nil
+				}
+				if itemID == "" {
+					return jf.ErrResult("item_id is required for rate."), nil, nil
 				}
 				body := map[string]any{"Rating": *args.Rating}
 				endpoint := fmt.Sprintf("/UserItems/%s/UserData", itemID)
@@ -83,8 +102,19 @@ func RegisterUserTools(server *mcp.Server, client jf.Client, enabled func(string
 				return jf.TextResult(fmt.Sprintf("Rating set to %.1f.", *args.Rating)), nil, nil
 
 			case "get_user_data":
+				if itemID == "" {
+					return jf.ErrResult("item_id is required for get_user_data."), nil, nil
+				}
+				targetUser := userID
+				if strings.TrimSpace(args.UserID) != "" {
+					resolvedUser, err := jf.EffectiveUserID(ctx, client, args.UserID)
+					if err != nil {
+						return jf.ResolveErrResult(err), nil, nil
+					}
+					targetUser = resolvedUser
+				}
 				endpoint := fmt.Sprintf("/UserItems/%s/UserData", itemID)
-				params := url.Values{"UserId": {userID}}
+				params := url.Values{"UserId": {targetUser}}
 				var data map[string]any
 				if err := client.Get(ctx, endpoint, params, &data); err != nil {
 					return jf.ErrResult("Jellyfin API error: %v", err), nil, nil
@@ -110,23 +140,43 @@ func RegisterUserTools(server *mcp.Server, client jf.Client, enabled func(string
 				return jf.TextResult(fmt.Sprintf("User data:\n\n%s", jf.FormatJSON(result))), nil, nil
 
 			case "set_user_data":
+				if strings.TrimSpace(args.UserID) != "" {
+					return jf.ErrResult("user_id is only supported for get_user_data; write actions update the configured user's own item state (omit user_id)."), nil, nil
+				}
 				body := make(map[string]any)
+				var fields []string
 				if args.Played != nil {
 					body["Played"] = *args.Played
+					fields = append(fields, fmt.Sprintf("played=%v", *args.Played))
 				}
 				if args.PlayCount != nil {
 					body["PlayCount"] = *args.PlayCount
+					fields = append(fields, fmt.Sprintf("play_count=%d", *args.PlayCount))
 				}
 				if args.PositionTicks != nil {
 					body["PlaybackPositionTicks"] = *args.PositionTicks
+					fields = append(fields, fmt.Sprintf("position=%s", formatPositionTicks(*args.PositionTicks)))
 				}
 				if args.Rating != nil {
 					body["Rating"] = *args.Rating
+					fields = append(fields, fmt.Sprintf("rating=%.1f", *args.Rating))
 				}
 				if len(body) == 0 {
 					return jf.ErrResult("Provide at least one field to update: played, play_count, position_ticks, rating."), nil, nil
 				}
-				if result := jf.ConfirmationGate(ctx, req, args.Confirm, "Overwrite the play state of this item? The values given replace its played flag, play count, position, or rating."); result != nil {
+				if itemID == "" {
+					return jf.ErrResult("item_id is required for set_user_data."), nil, nil
+				}
+				var warning string
+				if jf.ConfirmationNeededIn(ctx, req, args.Confirm) {
+					item, errRes := requireItemName(ctx, client, args.ItemID, userID)
+					if errRes != nil {
+						return errRes, nil, nil
+					}
+					uName := userName(ctx, client, userID)
+					warning = fmt.Sprintf("Update play state of '%s' for user '%s' (%s)? Other play state fields stay unchanged.", item, uName, strings.Join(fields, ", "))
+				}
+				if result := jf.ConfirmationGate(ctx, req, args.Confirm, warning); result != nil {
 					return result, nil, nil
 				}
 				endpoint := fmt.Sprintf("/UserItems/%s/UserData", itemID)
@@ -143,24 +193,30 @@ func RegisterUserTools(server *mcp.Server, client jf.Client, enabled func(string
 	}
 
 	// --- jellyfin_playlists ---
-	if enabled("jellyfin_playlists", AnnotWriteCreate) {
+	if ok, ro, annot := toolMode(enabled, "jellyfin_playlists", AnnotDestructive, AnnotReadOnly); ok {
 		locks := newPlaylistLocks()
+		roActions := []any{"list", "get"}
+		schema := jf.WithEnums[jf.PlaylistsInput](map[string][]any{
+			"action": {"list", "create", "get", "add_items", "remove_items", "move_item", "deduplicate", "delete"},
+		})
+		desc := "List, read, create, edit, reorder, deduplicate, or delete playlists as the configured user. " +
+			"move_item and deduplicate rewrite trailing entries via Jellyfin's remove-and-append API (use dry_run=true to preview)."
+		if ro {
+			schema = jf.WithEnumsFiltered[jf.PlaylistsInput](map[string][]any{"action": roActions}, []string{"action", "playlist_id", "user_id"})
+			desc = "List playlists or read a playlist's items."
+		}
 		mcp.AddTool(server, &mcp.Tool{
-			Name:  "jellyfin_playlists",
-			Title: "Playlists",
-			InputSchema: jf.WithEnums[jf.PlaylistsInput](map[string][]any{
-				"action": {"list", "create", "get", "add_items", "remove_items", "move_item", "deduplicate", "delete"},
-			}),
-			Description: "Create and manage playlists. Use 'list' to see all playlists, 'create' to make a new one, 'get' to view playlist items, " +
-				"'add_items' to append items, 'remove_items' to remove every entry of the given items, and 'move_item' to reorder. " +
-				"Use 'deduplicate' to remove repeated entries, keeping each item's first entry in place (dry_run=true by default for preview; set dry_run=false to remove, which asks the user to confirm). " +
-				"When creating, provide a name and optional media_type (Audio or Video). For add_items and remove_items, provide the playlist_id and item_ids array. " +
-				"For move_item, provide playlist_id, item_id, and new_index: the item's first entry moves to that 0-based position in the reordered playlist. " +
-				"Edits use the one method every supported Jellyfin version offers, removing every entry of an item and adding entries at the end, so move_item and deduplicate can remove and re-add a run of entries to keep the order; " +
-				"remove_items, move_item, and deduplicate accept dry_run=true to preview those requests. " +
-				"Changes act as the configured user, who must own the playlist or have edit access to it.",
-			Annotations: AnnotWriteCreate,
+			Name:        "jellyfin_playlists",
+			Title:       "Playlists",
+			InputSchema: schema,
+			Description: desc,
+			Annotations: annot,
 		}, func(ctx context.Context, req *mcp.CallToolRequest, args jf.PlaylistsInput) (*mcp.CallToolResult, any, error) {
+			if ro {
+				if res := requireReadOnlyAction(args.Action, roActions); res != nil {
+					return res, nil, nil
+				}
+			}
 			userID, err := client.GetUserID(ctx)
 			if err != nil {
 				return jf.ErrResult("Jellyfin error: %v", err), nil, nil
@@ -168,8 +224,16 @@ func RegisterUserTools(server *mcp.Server, client jf.Client, enabled func(string
 
 			switch args.Action {
 			case "list":
+				targetUser := userID
+				if strings.TrimSpace(args.UserID) != "" {
+					resolvedUser, err := jf.EffectiveUserID(ctx, client, args.UserID)
+					if err != nil {
+						return jf.ResolveErrResult(err), nil, nil
+					}
+					targetUser = resolvedUser
+				}
 				params := url.Values{
-					"UserId":           {userID},
+					"UserId":           {targetUser},
 					"IncludeItemTypes": {"Playlist"},
 					"Recursive":        {"true"},
 					"Fields":           {"ChildCount"},
@@ -194,6 +258,9 @@ func RegisterUserTools(server *mcp.Server, client jf.Client, enabled func(string
 				return jf.TextResult(fmt.Sprintf("%s\n\n%s", found, jf.FormatJSON(items))), nil, nil
 
 			case "create":
+				if strings.TrimSpace(args.UserID) != "" {
+					return jf.ErrResult("user_id is only supported for list and get; playlist write actions operate as the configured user (omit user_id)."), nil, nil
+				}
 				if args.Name == "" {
 					return jf.ErrResult("name is required to create a playlist."), nil, nil
 				}
@@ -214,9 +281,20 @@ func RegisterUserTools(server *mcp.Server, client jf.Client, enabled func(string
 				return jf.TextResult(fmt.Sprintf("Playlist created: %s (ID: %s)", args.Name, jf.GetString(result, "Id"))), nil, nil
 
 			case "delete":
+				if strings.TrimSpace(args.UserID) != "" {
+					return jf.ErrResult("user_id is only supported for list and get; playlist write actions operate as the configured user (omit user_id)."), nil, nil
+				}
 				if args.PlaylistID == "" {
 					return jf.ErrResult("playlist_id is required for 'delete' action."), nil, nil
 				}
+				if res := jf.DestructiveDisabledError(ctx); res != nil {
+					return res, nil, nil
+				}
+				resolvedID, err := jf.ResolvePlaylistID(ctx, client, userID, args.PlaylistID)
+				if err != nil {
+					return jf.ResolveErrResult(err), nil, nil
+				}
+				args.PlaylistID = resolvedID
 				name := itemName(ctx, client, args.PlaylistID, userID)
 				if result := jf.DestructiveGate(ctx, req, args.Confirm, fmt.Sprintf("Delete playlist '%s'? Its entries are dropped; the media stays in the library.", name)); result != nil {
 					return result, nil, nil
@@ -230,8 +308,21 @@ func RegisterUserTools(server *mcp.Server, client jf.Client, enabled func(string
 				if args.PlaylistID == "" {
 					return jf.ErrResult("playlist_id is required for 'get' action."), nil, nil
 				}
+				targetUser := userID
+				if strings.TrimSpace(args.UserID) != "" {
+					resolvedUser, err := jf.EffectiveUserID(ctx, client, args.UserID)
+					if err != nil {
+						return jf.ResolveErrResult(err), nil, nil
+					}
+					targetUser = resolvedUser
+				}
+				resolvedID, err := jf.ResolvePlaylistID(ctx, client, targetUser, args.PlaylistID)
+				if err != nil {
+					return jf.ResolveErrResult(err), nil, nil
+				}
+				args.PlaylistID = resolvedID
 				params := url.Values{
-					"UserId": {userID},
+					"UserId": {targetUser},
 				}
 				endpoint := fmt.Sprintf("/Playlists/%s/Items", jf.SanitizeID(args.PlaylistID))
 				rawItems, total, err := jf.FetchAllPages(ctx, client, endpoint, params, 1000)
@@ -246,10 +337,18 @@ func RegisterUserTools(server *mcp.Server, client jf.Client, enabled func(string
 				return jf.TextResult(fmt.Sprintf("%s:\n\n%s", header, jf.FormatJSON(items))), nil, nil
 
 			case "add_items":
+				if strings.TrimSpace(args.UserID) != "" {
+					return jf.ErrResult("user_id is only supported for list and get; playlist write actions operate as the configured user (omit user_id)."), nil, nil
+				}
 				args.ItemIDs = jf.SplitIDs(args.ItemIDs)
 				if args.PlaylistID == "" || len(args.ItemIDs) == 0 {
 					return jf.ErrResult("playlist_id and item_ids are required for 'add_items' action."), nil, nil
 				}
+				resolvedID, err := jf.ResolvePlaylistID(ctx, client, userID, args.PlaylistID)
+				if err != nil {
+					return jf.ResolveErrResult(err), nil, nil
+				}
+				args.PlaylistID = resolvedID
 				unlock, err := locks.lock(ctx, args.PlaylistID)
 				if err != nil {
 					return jf.ErrResult("Stopped while waiting for another change to this playlist to finish: %v", err), nil, nil
@@ -277,6 +376,9 @@ func RegisterUserTools(server *mcp.Server, client jf.Client, enabled func(string
 				return jf.TextResult(msg), nil, nil
 
 			case "remove_items", "move_item", "deduplicate":
+				if strings.TrimSpace(args.UserID) != "" {
+					return jf.ErrResult("user_id is only supported for list and get; playlist write actions operate as the configured user (omit user_id)."), nil, nil
+				}
 				return handlePlaylistEdit(ctx, req, client, locks, userID, args)
 
 			default:
@@ -286,18 +388,15 @@ func RegisterUserTools(server *mcp.Server, client jf.Client, enabled func(string
 	}
 
 	// --- jellyfin_collections ---
-	if enabled("jellyfin_collections", AnnotWriteCreate) {
+	if enabled("jellyfin_collections", AnnotDestructive) {
 		mcp.AddTool(server, &mcp.Tool{
 			Name:  "jellyfin_collections",
 			Title: "Collections",
 			InputSchema: jf.WithEnums[jf.CollectionsInput](map[string][]any{
 				"action": {"create", "add_items", "remove_items"},
 			}),
-			Description: "Create and manage box set collections. Collections group related movies together (such as a film trilogy). " +
-				"Use 'create' with a name and optional item_ids to create a new collection. " +
-				"Use 'add_items' or 'remove_items' with a collection_id and item_ids to modify collection contents. " +
-				"Collections appear as BoxSet items in browse and search results.",
-			Annotations: AnnotWriteCreate,
+			Description: "Create BoxSet collections or add and remove collection items.",
+			Annotations: AnnotDestructive,
 		}, func(ctx context.Context, req *mcp.CallToolRequest, args jf.CollectionsInput) (*mcp.CallToolResult, any, error) {
 			userID, err := client.GetUserID(ctx)
 			if err != nil {
@@ -313,7 +412,11 @@ func RegisterUserTools(server *mcp.Server, client jf.Client, enabled func(string
 					params.Set("ids", jf.JoinIDs(args.ItemIDs))
 				}
 				if args.ParentID != "" {
-					params.Set("ParentId", args.ParentID)
+					parentID, err := jf.ResolveLibraryID(ctx, client, args.ParentID)
+					if err != nil {
+						return jf.ResolveErrResult(err), nil, nil
+					}
+					params.Set("ParentId", parentID)
 				}
 				var result map[string]any
 				if err := client.Post(ctx, "/Collections", params, nil, &result); err != nil {
@@ -325,6 +428,11 @@ func RegisterUserTools(server *mcp.Server, client jf.Client, enabled func(string
 				if args.CollectionID == "" || len(args.ItemIDs) == 0 {
 					return jf.ErrResult("collection_id and item_ids are required for 'add_items' action."), nil, nil
 				}
+				colID, err := jf.ResolveCollectionID(ctx, client, userID, args.CollectionID)
+				if err != nil {
+					return jf.ResolveErrResult(err), nil, nil
+				}
+				args.CollectionID = colID
 				ids := jf.SplitIDs(args.ItemIDs)
 				params := url.Values{"ids": {jf.JoinIDs(ids)}}
 				endpoint := fmt.Sprintf("/Collections/%s/Items", jf.SanitizeID(args.CollectionID))
@@ -337,9 +445,24 @@ func RegisterUserTools(server *mcp.Server, client jf.Client, enabled func(string
 				if args.CollectionID == "" || len(args.ItemIDs) == 0 {
 					return jf.ErrResult("collection_id and item_ids are required for 'remove_items' action."), nil, nil
 				}
+				if res := jf.DestructiveDisabledError(ctx); res != nil {
+					return res, nil, nil
+				}
+				colID, err := jf.ResolveCollectionID(ctx, client, userID, args.CollectionID)
+				if err != nil {
+					return jf.ResolveErrResult(err), nil, nil
+				}
+				args.CollectionID = colID
 				ids := jf.SplitIDs(args.ItemIDs)
 				collection := itemName(ctx, client, args.CollectionID, userID)
-				warning := fmt.Sprintf("Remove %s from collection '%s'? The %s in the library.", nameList(ids, itemNames(ctx, client, ids, userID)), collection, plural(len(ids), "item stays", "items stay"))
+				var warning string
+				if jf.ConfirmationNeededIn(ctx, req, args.Confirm) {
+					names, errRes := requireItemNames(ctx, client, ids, userID)
+					if errRes != nil {
+						return errRes, nil, nil
+					}
+					warning = fmt.Sprintf("Remove %s from collection '%s'? The %s in the library.", nameList(ids, names), collection, plural(len(ids), "item stays", "items stay"))
+				}
 				if result := jf.DestructiveGate(ctx, req, args.Confirm, warning); result != nil {
 					return result, nil, nil
 				}
@@ -355,4 +478,15 @@ func RegisterUserTools(server *mcp.Server, client jf.Client, enabled func(string
 			}
 		})
 	}
+}
+
+func formatPositionTicks(ticks int64) string {
+	if ticks <= 0 {
+		return "00:00:00"
+	}
+	totalSeconds := ticks / jf.TicksPerSecond
+	hours := totalSeconds / 3600
+	minutes := (totalSeconds % 3600) / 60
+	seconds := totalSeconds % 60
+	return fmt.Sprintf("%02d:%02d:%02d", hours, minutes, seconds)
 }

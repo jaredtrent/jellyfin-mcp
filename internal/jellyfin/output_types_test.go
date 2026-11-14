@@ -74,8 +74,20 @@ func TestOutputs_AlwaysPresentFields(t *testing.T) {
 				`"unread_types"`, `"total_size_gb"`, `"total_size_mb"`, `"by_type"`,
 				`"size_report_type"`, `"size_report"`, `"codec_report"`, `"items"`,
 				`"total_count"`, `"total_is_lower_bound"`, `"shown"`, `"days"`,
-				`"undated_count"`, `"duplicates"`, `"item_summary"`, `"users"`, `"notes"`,
+				`"undated_count"`, `"duplicates"`, `"notes"`,
 			},
+		},
+		{
+			name:    "playback stats history with no entries",
+			value:   PlaybackStatsOutput{History: &[]PlaybackHistoryEntry{}},
+			present: []string{`"history":[]`},
+			absent:  []string{`"item_summary"`, `"users"`, `"most_played"`, `"unwatched"`, `"total_count"`, `"shown"`, `"notes"`},
+		},
+		{
+			name:    "playback stats most_played with zero plays",
+			value:   PopularItemEntry{ID: "m1", Name: "Movie", Type: "Movie"},
+			present: []string{`"users_played":0`, `"total_plays":0`},
+			absent:  []string{`"year"`, `"series_name"`, `"last_played"`},
 		},
 		{
 			name:    "played status of a user who never played",

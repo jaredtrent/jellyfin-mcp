@@ -15,14 +15,18 @@ import (
 // state is the date the client connects rather than the date the server
 // started.
 func instructionsMiddleware(now func() time.Time) mcp.Middleware {
+	return modeInstructionsMiddleware(now, false)
+}
+
+func modeInstructionsMiddleware(now func() time.Time, readOnly bool) mcp.Middleware {
 	return func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
 			result, err := next(ctx, method, req)
 			switch r := result.(type) {
 			case *mcp.InitializeResult:
-				r.Instructions = serverInstructions(now())
+				r.Instructions = serverInstructions(now(), readOnly)
 			case *mcp.DiscoverResult:
-				r.Instructions = serverInstructions(now())
+				r.Instructions = serverInstructions(now(), readOnly)
 			}
 			return result, err
 		}

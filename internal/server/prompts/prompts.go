@@ -34,7 +34,7 @@ func RegisterPrompts(server *mcp.Server, _ jf.Client) {
 		instruction += "\n2. Show me the results and let me pick one" +
 			"\n3. Use jellyfin_sessions action=\"list\" to find an active session" +
 			"\n4. If no sessions are active, tell me I need to open a Jellyfin client (web, mobile, or TV app) first" +
-			"\n5. Use jellyfin_play with the chosen item and session"
+			"\n5. Use jellyfin_playback action=\"PlayNow\" with the chosen item_ids and session_id"
 
 		return &mcp.GetPromptResult{
 			Description: "Find and play media",
@@ -81,12 +81,11 @@ func RegisterPrompts(server *mcp.Server, _ jf.Client) {
 		instruction := "Show me what's new and what I should watch next. Follow these steps:\n"
 		if library != "" {
 			instruction += fmt.Sprintf(
-				"1. Use jellyfin_libraries to find the library ID for \"%s\"\n"+
-					"2. Gather data in parallel:\n"+
-					"   - jellyfin_recommendations action=\"latest\" with that parent_id\n"+
+				"1. Gather data in parallel:\n"+
+					"   - jellyfin_recommendations action=\"latest\" parent_id=\"%s\"\n"+
 					"   - jellyfin_recommendations action=\"next_up\" to see next episodes to watch\n"+
 					"   - jellyfin_sessions action=\"resume\" to find in-progress items\n", library)
-			instruction += "3. Present a combined viewing guide: new additions, next episodes, and items to resume, " +
+			instruction += "2. Present a combined viewing guide: new additions, next episodes, and items to resume, " +
 				"organized by category with ratings and brief descriptions"
 		} else {
 			instruction += "1. Gather data in parallel:\n" +
@@ -194,7 +193,7 @@ func RegisterPrompts(server *mcp.Server, _ jf.Client) {
 			"3. If I pick an artist or album, offer to generate a smart mix using " +
 			"jellyfin_music action=\"instant_mix\" with that item's ID for a playlist of similar tracks\n" +
 			"4. Use jellyfin_sessions action=\"list\" to find an active session\n" +
-			"5. Use jellyfin_play with the chosen item(s) and session"
+			"5. Use jellyfin_playback action=\"PlayNow\" with the chosen item_ids and session_id"
 
 		return &mcp.GetPromptResult{
 			Description: "Find and play music",
@@ -224,7 +223,7 @@ func RegisterPrompts(server *mcp.Server, _ jf.Client) {
 			"4. Show my progress: where I am now, and how many episodes remain from the next-up episode to the end of the series, counted from the episode_count of the current and later seasons\n" +
 			"5. Offer to queue the next 3-5 episodes. Use jellyfin_tv_shows action=\"episodes\" with the series_id and season_number set to the next-up episode's season, " +
 			"and take the next-up episode and the ones after it by episode_number, continuing into the next season if needed. " +
-			"Then use jellyfin_sessions action=\"list\" to pick a session and jellyfin_play with play_command=\"PlayNow\" and those episode IDs in order"
+			"Then use jellyfin_sessions action=\"list\" to pick a session and jellyfin_playback with action=\"PlayNow\" and those episode item_ids in order"
 
 		return &mcp.GetPromptResult{
 			Description: "TV binge session setup",
@@ -305,7 +304,7 @@ func RegisterPrompts(server *mcp.Server, _ jf.Client) {
 			"1. Use jellyfin_system_info action=\"ping\" to check if the server is responsive\n" +
 			"2. After ping succeeds, gather diagnostic data in parallel:\n" +
 			"   - jellyfin_system_info action=\"info\" for server version and pending restart\n" +
-			"   - jellyfin_tasks action=\"list\" to check for failed or stuck tasks\n" +
+			"   - jellyfin_server action=\"list_tasks\" to check for failed or stuck tasks\n" +
 			"   - jellyfin_plugins action=\"list\" for each plugin's status: Malfunctioned or NotSupported means the plugin failed to load, and Restart or Superseded means a server restart is pending\n" +
 			"   - jellyfin_system_info action=\"logs\" to find the most recent server log (named log_*.log, not FFmpeg logs)\n" +
 			"   - jellyfin_system_info action=\"activity_log\" severity=\"Error,Warning\" for recent failures such as failed logins, tasks, or plugin updates\n" +
@@ -320,15 +319,15 @@ func RegisterPrompts(server *mcp.Server, _ jf.Client) {
 				"   - A title that won't play, stops, stutters, buffers, or transcodes:\n" +
 				"     - jellyfin_sessions action=\"list\" to check active playback sessions, including play_method and transcoding_info (codecs, bitrate_kbps, is_video_direct, is_audio_direct, and transcode_reasons)\n" +
 				"     - If the issue names a title, find it with jellyfin_search, then jellyfin_item_extras action=\"playback_info\" with its item_id to see whether it direct plays or transcodes and why\n" +
-				"     - If the issue names a person, find their user_id with jellyfin_users action=\"list\", then jellyfin_system_info action=\"activity_log\" with that user_id (and the item_id, if known) for their playback starts, stops, and failures\n" +
-				"     - jellyfin_system_info action=\"logs\" lists the FFmpeg logs (named FFmpeg.*.log), one per transcode; read the newest with action=\"log_file\" for the ffmpeg error\n" +
+				"     - If the issue names a person, call jellyfin_system_info action=\"activity_log\" with their user_id (username or ID) and item_id (if known) for their playback starts, stops, and failures\n" +
+				"     - jellyfin_system_info action=\"logs\" log_type=\"ffmpeg\" lists the FFmpeg logs (named FFmpeg.*.log), one per transcode; read the newest with action=\"log_file\" for the ffmpeg error\n" +
 				"     - jellyfin_analytics action=\"codec_report\" to identify transcoding-heavy codecs and resolutions, adding type=\"Episode\" when the issue is with TV shows\n" +
 				"     - Reference jellyfin://guides/transcoding for hardware transcoding setup\n" +
 				"   - A client that can't connect, or a server that can't be reached from outside the home network:\n" +
 				"     - jellyfin_server action=\"get_config_section\" key=\"network\" for the base URL, ports, and remote access settings\n" +
 				"     - Reference jellyfin://guides/remote-access for reverse proxy and port forwarding setup\n" +
 				"   - Items missing from a library, a scan that doesn't finish, or wrong metadata:\n" +
-				"     - jellyfin_tasks action=\"list\" to check library scan status\n" +
+				"     - jellyfin_server action=\"list_tasks\" to check library scan status\n" +
 				"     - jellyfin_libraries to verify library configuration\n" +
 				"     - Reference jellyfin://guides/library-setup for library organization\n" +
 				"   - A plugin that fails or misbehaves:\n" +
@@ -378,33 +377,32 @@ func RegisterPrompts(server *mcp.Server, _ jf.Client) {
 		}
 
 		instruction := fmt.Sprintf("Help me fix metadata issues in the \"%s\" library. Issue type: %s\n\n", library, issue)
-		instruction += fmt.Sprintf("1. Use jellyfin_libraries to find the library ID for \"%s\"\n", library)
 
 		switch issue {
 		case "missing_overview":
-			instruction += "2. Use jellyfin_browse with the library parent_id, sort_by=\"SortName\" to list items (paginate with start_index to cover the full library)\n" +
-				"3. Browse results include overview when present, so items WITHOUT an 'overview' field in the results genuinely lack one. No need to call jellyfin_get_item to confirm.\n" +
-				"4. For each item with a missing overview, use jellyfin_metadata action=\"search\" with search_type set to the item's type (such as Movie or Series) and search_query set to its name to find the correct match\n" +
-				"5. Present the items and proposed fixes. " + perItemFix("its overview")
+			instruction += fmt.Sprintf("1. Use jellyfin_browse with parent_id=\"%s\", sort_by=\"SortName\" to list items (paginate with start_index to cover the full library)\n", library) +
+				"2. Browse results include overview when present, so items WITHOUT an 'overview' field in the results genuinely lack one. No need to call jellyfin_get_item to confirm.\n" +
+				"3. For each item with a missing overview, use jellyfin_metadata action=\"search\" with search_type set to the item's type (such as Movie or Series) and search_query set to its name to find the correct match\n" +
+				"4. Present the items and proposed fixes. " + perItemFix("its overview")
 		case "wrong_year":
-			instruction += "2. Use jellyfin_browse with the library parent_id to list items\n" +
-				"3. Identify items where the year looks wrong (compare with known release years)\n" +
-				"4. For each wrong item, use jellyfin_metadata action=\"search\" with search_type set to the item's type, search_query set to its name, and search_year set to the correct year to find the right match\n" +
-				"5. Present the corrections. " + perItemFix("its production_year")
+			instruction += fmt.Sprintf("1. Use jellyfin_browse with parent_id=\"%s\" to list items\n", library) +
+				"2. Identify items where the year looks wrong (compare with known release years)\n" +
+				"3. For each wrong item, use jellyfin_metadata action=\"search\" with search_type set to the item's type, search_query set to its name, and search_year set to the correct year to find the right match\n" +
+				"4. Present the corrections. " + perItemFix("its production_year")
 		case "missing_genres":
-			instruction += "2. Use jellyfin_browse with the library parent_id to list items\n" +
-				"3. Browse results do NOT include genres, so use jellyfin_get_item on each item to check if genres are empty\n" +
-				"4. For each item missing genres, use jellyfin_metadata action=\"search\" with search_type set to the item's type and search_query set to its name to find the correct match\n" +
-				"5. Present the fixes. The genres field replaces the item's whole genre list, as tags and studios replace theirs, so include every genre the item should keep. " + perItemFix("its genres")
+			instruction += fmt.Sprintf("1. Use jellyfin_browse with parent_id=\"%s\" to list items\n", library) +
+				"2. Browse results do NOT include genres, so use jellyfin_get_item on each item to check if genres are empty\n" +
+				"3. For each item missing genres, use jellyfin_metadata action=\"search\" with search_type set to the item's type and search_query set to its name to find the correct match\n" +
+				"4. Present the fixes. The genres field replaces the item's whole genre list, as tags and studios replace theirs, so include every genre the item should keep. " + perItemFix("its genres")
 		case "wrong_title", "re_identify":
-			instruction += "2. Use jellyfin_browse with the library parent_id to list items\n" +
-				"3. For each misidentified item, use jellyfin_metadata action=\"search\" with search_query set to the correct title\n" +
-				"4. Show the search results and let the user pick the correct match\n" +
-				"5. Use jellyfin_metadata action=\"apply\" with provider_name set to a key from the chosen result's provider_ids (such as Tmdb) and provider_id set to its value\n"
+			instruction += fmt.Sprintf("1. Use jellyfin_browse with parent_id=\"%s\" to list items\n", library) +
+				"2. For each misidentified item, use jellyfin_metadata action=\"search\" with search_query set to the correct title\n" +
+				"3. Show the search results and let the user pick the correct match\n" +
+				"4. Use jellyfin_metadata action=\"apply\" with provider_name set to a key from the chosen result's provider_ids (such as Tmdb) and provider_id set to its value\n"
 		default:
-			instruction += "2. Use jellyfin_browse with the library parent_id to scan items\n" +
-				"3. Identify any metadata problems\n" +
-				"4. Present findings and offer to fix using jellyfin_metadata\n"
+			instruction += fmt.Sprintf("1. Use jellyfin_browse with parent_id=\"%s\" to scan items\n", library) +
+				"2. Identify any metadata problems\n" +
+				"3. Present findings and offer to fix using jellyfin_metadata\n"
 		}
 
 		return &mcp.GetPromptResult{
@@ -433,12 +431,11 @@ func RegisterPrompts(server *mcp.Server, _ jf.Client) {
 		}
 
 		instruction := fmt.Sprintf("Audit the \"%s\" library for missing subtitles (language: %s). Follow these steps:\n", library, language) +
-			fmt.Sprintf("1. Use jellyfin_libraries to find the library ID for \"%s\"\n", library) +
-			"2. Use jellyfin_browse with parent_id and has_subtitles=false to find items without subtitles. This finds items with no subtitles at all, so items that have subtitles only in other languages are not included; say so in the report\n" +
-			"3. Report the count of items missing subtitles\n" +
-			"4. Ask if I want to batch-download subtitles for these items\n" +
-			fmt.Sprintf("5. If I want them, use jellyfin_subtitles_lyrics action=\"batch_download_subtitles\" with the item_ids and language=\"%s\", in batches of at most 25 item_ids per call (the tool asks me to confirm)\n", language) +
-			"6. Present the results showing which items got subtitles and which failed"
+			fmt.Sprintf("1. Use jellyfin_browse with parent_id=\"%s\" and has_subtitles=false to find items without subtitles. This finds items with no subtitles at all, so items that have subtitles only in other languages are not included; say so in the report\n", library) +
+			"2. Report the count of items missing subtitles\n" +
+			"3. Ask if I want to batch-download subtitles for these items\n" +
+			fmt.Sprintf("4. If I want them, use jellyfin_subtitles_lyrics action=\"batch_download_subtitles\" with the item_ids and language=\"%s\", in batches of at most 25 item_ids per call (the tool asks me to confirm)\n", language) +
+			"5. Present the results showing which items got subtitles and which failed"
 
 		return &mcp.GetPromptResult{
 			Description: "Subtitle audit and download",
@@ -462,8 +459,7 @@ func RegisterPrompts(server *mcp.Server, _ jf.Client) {
 
 		instruction := "Generate a comprehensive library analytics report. Follow these steps:\n"
 		if library != "" {
-			instruction += fmt.Sprintf("1. Use jellyfin_libraries to find the library ID and collection type for \"%s\"\n", library)
-			instruction += "2. Gather all analytics data in parallel using the parent_id:\n"
+			instruction += fmt.Sprintf("1. Gather all analytics data in parallel with parent_id=%q (parent_id accepts library names directly):\n", library)
 			instruction += "   - jellyfin_analytics action=\"library_stats\" for item counts by type\n"
 			instruction += "   - jellyfin_analytics action=\"codec_report\" for codec/resolution distribution (pass type=\"Episode\" for a TV library or type=\"Audio\" for a music library)\n"
 			instruction += "   - jellyfin_analytics action=\"never_played\" for unplayed items\n"
@@ -511,16 +507,15 @@ func RegisterPrompts(server *mcp.Server, _ jf.Client) {
 		}
 
 		instruction := fmt.Sprintf("Find duplicate %s items in the \"%s\" library. Follow these steps:\n", itemType, library) +
-			fmt.Sprintf("1. Use jellyfin_libraries to find the library ID for \"%s\"\n", library) +
-			fmt.Sprintf("2. Use jellyfin_analytics action=\"duplicate_check\" type=\"%s\" with the parent_id\n", itemType) +
-			"3. For each duplicate group, use jellyfin_get_item for each copy to compare quality (resolution, bitrate, codec, file size)\n" +
-			"4. Present a comparison table for each duplicate group showing:\n" +
+			fmt.Sprintf("1. Use jellyfin_analytics action=\"duplicate_check\" type=\"%s\" parent_id=\"%s\"\n", itemType, library) +
+			"2. For each duplicate group, use jellyfin_get_item for each copy to compare quality (resolution, bitrate, codec, file size)\n" +
+			"3. Present a comparison table for each duplicate group showing:\n" +
 			"   - Resolution, codec, bitrate, file size, file path\n" +
 			"   - Which copy is recommended to keep (higher quality)\n" +
-			"5. Before offering any deletion, confirm that the copies in each group are the same title and differ only in file path, because duplicate_check groups items by name and year only. " +
+			"4. Before offering any deletion, confirm that the copies in each group are the same title and differ only in file path, because duplicate_check groups items by name and year only. " +
 			"Leave out any group that fails this check\n" +
-			"6. Ask if I want to delete any inferior copies\n" +
-			"7. For each copy I choose to remove, use jellyfin_library_manage action=\"delete_item\" (the tool asks me to confirm each deletion)"
+			"5. Ask if I want to delete any inferior copies\n" +
+			"6. For each copy I choose to remove, use jellyfin_library_manage action=\"delete_item\" (the tool asks me to confirm each deletion)"
 
 		return &mcp.GetPromptResult{
 			Description: "Find and remove duplicate media",
@@ -548,20 +543,17 @@ func RegisterPrompts(server *mcp.Server, _ jf.Client) {
 		}
 
 		instruction := "Show watch history. Follow these steps:\n"
-		step := 1
 		forUser := ""
 		if user != "" {
-			instruction += fmt.Sprintf("1. Use jellyfin_users action=\"list\" to find the user ID for \"%s\"\n", user)
-			step = 2
-			forUser = " with that user_id and"
+			forUser = fmt.Sprintf(" user_id=\"%s\"", user)
 		}
-		instruction += fmt.Sprintf("%d. Use jellyfin_system_info action=\"playback_history\"%s limit=200. "+
-			"It lists items with verified playback, newest first, and each item appears once with its last_played time and play_count\n", step, forUser)
-		instruction += fmt.Sprintf("%d. Keep the items whose last_played date falls within the last %s days\n", step+1, days) +
-			fmt.Sprintf("%d. Present a chronological watch history showing:\n", step+2) +
+		instruction += fmt.Sprintf("1. Use jellyfin_playback_stats action=\"playback_history\"%s limit=200. "+
+			"It lists items with verified playback, newest first, and each item appears once with its last_played time and play_count\n", forUser)
+		instruction += fmt.Sprintf("2. Keep the items whose last_played date falls within the last %s days\n", days) +
+			"3. Present a chronological watch history showing:\n" +
 			"   - When it was last played\n" +
 			"   - What was played (title, type, and series, season, and episode for TV)\n" +
-			fmt.Sprintf("%d. Summarize: total items watched and the average per day", step+3)
+			"4. Summarize: total items watched and the average per day"
 
 		return &mcp.GetPromptResult{
 			Description: "Watch history report",
@@ -583,29 +575,24 @@ func RegisterPrompts(server *mcp.Server, _ jf.Client) {
 	}, func(_ context.Context, req *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
 		library := req.Params.Arguments["library"]
 
-		instruction := "Analyze media codecs and optimize transcoding settings. Follow these steps:\n"
+		instruction := "Analyze media codecs and optimize transcoding settings. Follow these steps:\n" +
+			"1. Gather data in parallel:\n"
 		if library != "" {
-			instruction += fmt.Sprintf("1. Use jellyfin_libraries to find the library ID and collection type for \"%s\"\n", library)
-			instruction += "2. Gather data in parallel using the parent_id:\n"
+			instruction += fmt.Sprintf("   - jellyfin_analytics action=\"codec_report\" parent_id=%q for codec/resolution distribution (parent_id accepts library names directly; pass type=\"Episode\" for TV libraries)\n", library)
 		} else {
-			instruction += "1. Gather data in parallel:\n"
+			instruction += "   - jellyfin_analytics action=\"codec_report\" for movie codec/resolution distribution, and a second call with type=\"Episode\" for TV episodes\n"
 		}
-		instruction += "   - jellyfin_analytics action=\"codec_report\" for codec/resolution distribution (pass type=\"Episode\" for TV libraries or run both Movie and Episode when scanning all libraries)\n" +
-			"   - jellyfin_server action=\"get_config_section\" key=\"encoding\" for current transcoding settings\n" +
+		instruction += "   - jellyfin_server action=\"get_config_section\" key=\"encoding\" for current transcoding settings\n" +
 			"   - jellyfin_system_info action=\"info\" for the server version. It does not report hardware, so ask me which CPU or GPU the server uses\n"
-		step := 3
-		if library != "" {
-			step = 4
-		}
-		instruction += fmt.Sprintf("%d. Analyze the codec distribution and identify:\n", step) +
+		instruction += "2. Analyze the codec distribution and identify:\n" +
 			"   - Codecs that require transcoding on most clients, such as HEVC on older devices\n" +
-			"   - Resolution distribution and bandwidth implications, using jellyfin_browse with is_4k, is_hd, or group_by_series=true when listing specific titles or shows helps\n" +
+			"   - Resolution distribution and bandwidth implications, using jellyfin_browse with resolution (sd, 720p, 1080p, 1440p, 4k, 8k) or group_by_series=true when listing specific titles or shows helps\n" +
 			"   - Audio codecs that may need transcoding\n"
-		instruction += fmt.Sprintf("%d. Compare with current hardware transcoding settings and suggest optimizations:\n", step+1) +
+		instruction += "3. Compare with current hardware transcoding settings and suggest optimizations:\n" +
 			"   - Recommend a hardware acceleration method based on the CPU or GPU I describe\n" +
 			"   - Suggest enabling/disabling specific codec support\n" +
 			"   - Reference jellyfin://guides/transcoding for setup instructions\n"
-		instruction += fmt.Sprintf("%d. If changes are needed, offer to apply them with jellyfin_server action=\"update_config_section\" key=\"encoding\"", step+2)
+		instruction += "4. If changes are needed, offer to apply them with jellyfin_server action=\"update_config_section\" key=\"encoding\""
 
 		return &mcp.GetPromptResult{
 			Description: "Codec analysis and transcoding optimization",
@@ -640,7 +627,7 @@ func RegisterPrompts(server *mcp.Server, _ jf.Client) {
 			"5. Use jellyfin_users action=\"update_policy\" with the user_id and:\n" +
 			"   - is_admin=false\n" +
 			"   - enable_all_folders=false\n" +
-			"   - enabled_folder_ids=[selected library IDs]\n" +
+			"   - enabled_folder_ids=[selected library names or IDs]\n" +
 			fmt.Sprintf("6. The tools cannot set a content rating limit. Tell me to set the maximum rating to %s in Dashboard > Users > select the user > Parental Control\n", maxRating) +
 			"7. Reference jellyfin://guides/users-and-access for other parental control options that are also set in the dashboard:\n" +
 			"   - Tag-based blocking for specific content\n" +
@@ -674,7 +661,7 @@ func RegisterPrompts(server *mcp.Server, _ jf.Client) {
 			"   - Networking: base URL, remote access settings\n" +
 			"   - General: metadata providers and subtitle settings\n" +
 			"4. Present findings and suggest optimizations based on the server's configuration and hardware\n" +
-			"5. For changes to a named section such as encoding or network, use jellyfin_server action=\"update_config_section\" with that key and the full modified section (the tool asks me to confirm). " +
+			"5. For changes to a named section such as encoding or network, use jellyfin_server action=\"update_config_section\" with that key and a JSON object containing only the fields to update (the tool merges them and asks me to confirm). " +
 			"The tools cannot write the main configuration from get_config, so tell me where in the dashboard to make those changes"
 
 		return &mcp.GetPromptResult{
@@ -696,7 +683,7 @@ func RegisterPrompts(server *mcp.Server, _ jf.Client) {
 			"1. Use jellyfin_system_info action=\"health_check\", which checks server status, storage, tasks, plugins, logs, and backups in one call\n" +
 			"2. If the health_check returns warnings or errors, drill into specific areas:\n" +
 			"   - For storage warnings: jellyfin_analytics action=\"size_report\" to find what's using space\n" +
-			"   - For task failures: health_check names the failed tasks, so find each one's id with jellyfin_tasks action=\"list\", then use jellyfin_tasks action=\"get\" with that task_id for details\n" +
+			"   - For task failures: health_check names the failed tasks, so find each one's id with jellyfin_server action=\"list_tasks\", then use jellyfin_server action=\"get_task\" with that task_id for details\n" +
 			"   - For log errors: jellyfin_system_info action=\"log_file\" with severity=\"warn+error\" for full context\n" +
 			"   - For plugin issues: jellyfin_plugins action=\"list\" for version details\n" +
 			"3. Summarize: overall status, any action items, and their urgency\n" +

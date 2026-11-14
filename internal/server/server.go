@@ -11,7 +11,9 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -51,17 +53,17 @@ func Run(cfg Config) {
 	go logServerVersion(client)
 
 	tracker := &subscriptionTracker{}
-	srv := newServer(cfg, client, tracker)
-
-	// Start resource subscription poller
 	pollerCtx, pollerCancel := context.WithCancel(context.Background())
 	defer pollerCancel()
-	startResourcePoller(pollerCtx, srv, client, tracker, sessionPollInterval, contentPollInterval)
 
 	// Run via selected transport
 	if cfg.HTTPMode {
-		runHTTP(srv, cfg.HTTPAddr, cfg.HTTPToken)
+		pool := newServerPool(cfg, client, tracker)
+		startPoolResourcePoller(pollerCtx, pool, client, tracker, sessionPollInterval, contentPollInterval)
+		runHTTPPool(pool, cfg.HTTPAddr, cfg.HTTPToken)
 	} else {
+		srv := newServer(cfg, client, tracker)
+		startResourcePoller(pollerCtx, srv, client, tracker, sessionPollInterval, contentPollInterval)
 		runStdio(srv)
 	}
 }
@@ -69,6 +71,20 @@ func Run(cfg Config) {
 // newServer builds the MCP server with every resource, prompt, and enabled
 // tool registered against client.
 func newServer(cfg Config, client jf.Client, tracker *subscriptionTracker) *mcp.Server {
+	if strings.TrimSpace(cfg.Toolsets) == "" && !cfg.ReadOnly {
+		access, _ := tools.ResolveToolAccess("", false)
+		return newServerWithAccess(cfg, access, client, tracker, jf.NewConfirmationLedger(elicitationTimeout))
+	}
+	access, unknown := tools.ResolveToolAccess(cfg.Toolsets, cfg.ReadOnly)
+	tools.LogUnknownToolsets(unknown)
+	return newServerWithAccess(cfg, access, client, tracker, jf.NewConfirmationLedger(elicitationTimeout))
+}
+
+func newServerWithAccess(cfg Config, access map[string]tools.ToolAccess, client jf.Client, tracker *subscriptionTracker, ledger *jf.ConfirmationLedger) *mcp.Server {
+	effectiveRO := cfg.ReadOnly || !tools.HasWriteAccess(access)
+	if ledger == nil {
+		ledger = jf.NewConfirmationLedger(elicitationTimeout)
+	}
 	srv := mcp.NewServer(&mcp.Implementation{
 		Name:        "jellyfin",
 		Title:       "Jellyfin Media Server",
@@ -85,12 +101,209 @@ func newServer(cfg Config, client jf.Client, tracker *subscriptionTracker) *mcp.
 		SubscribeHandler:   subscribeHandler(tracker),
 		UnsubscribeHandler: unsubscribeHandler(tracker),
 	})
-	srv.AddReceivingMiddleware(timingMiddleware(), instructionsMiddleware(time.Now), plainErrors(), tools.DestructivePolicy(cfg.DisableDestructive), tools.ConfirmationNote())
+	srv.AddReceivingMiddleware(
+		timingMiddleware(),
+		modeInstructionsMiddleware(time.Now, effectiveRO),
+		plainErrors(),
+		tools.DestructivePolicy(cfg.DisableDestructive),
+		tools.ConfirmationLedgerMiddleware(ledger),
+		tools.ConfirmationNote(),
+	)
 	srv.AddSendingMiddleware(boundElicitation(elicitationTimeout))
 	resources.RegisterResources(srv, client)
 	prompts.RegisterPrompts(srv, client)
-	tools.RegisterTools(srv, client, tools.BuildToolFilter(cfg.Toolsets, cfg.ReadOnly))
+	tools.RegisterTools(srv, client, tools.FilterFromAccess(access))
 	return srv
+}
+
+type pooledEntry struct {
+	server  *mcp.Server
+	handler http.Handler
+}
+
+// serverPool caches MCP server and Streamable HTTP handler instances keyed by
+// canonical effective tool access so HTTP /mcp?toolsets=...&read_only=...
+// connections receive true server-side schema projections, isolated stateful
+// session maps, and read-only instructions while strictly narrowing the
+// operator's base CLI configuration.
+type serverPool struct {
+	baseCfg      Config
+	baseAccess   map[string]tools.ToolAccess
+	client       jf.Client
+	tracker      *subscriptionTracker
+	ledger       *jf.ConfirmationLedger
+	defaultEntry pooledEntry
+
+	mu      sync.Mutex
+	entries map[string]pooledEntry
+}
+
+func newServerPool(cfg Config, client jf.Client, tracker *subscriptionTracker) *serverPool {
+	baseAccess, unknown := tools.ResolveToolAccess(cfg.Toolsets, cfg.ReadOnly)
+	tools.LogUnknownToolsets(unknown)
+	defaultRO := cfg.ReadOnly || !tools.HasWriteAccess(baseAccess)
+	ledger := jf.NewConfirmationLedger(elicitationTimeout)
+	defaultSrv := newServerWithAccess(cfg, baseAccess, client, tracker, ledger)
+	entry := pooledEntry{
+		server:  defaultSrv,
+		handler: newHTTPHandler(defaultSrv),
+	}
+	defaultKey := accessCacheKey(baseAccess, defaultRO)
+	return &serverPool{
+		baseCfg:      cfg,
+		baseAccess:   baseAccess,
+		client:       client,
+		tracker:      tracker,
+		ledger:       ledger,
+		defaultEntry: entry,
+		entries:      map[string]pooledEntry{defaultKey: entry},
+	}
+}
+
+func accessCacheKey(access map[string]tools.ToolAccess, readOnly bool) string {
+	entries := make([]string, 0, len(access))
+	for name, acc := range access {
+		if acc != tools.AccessNone {
+			entries = append(entries, fmt.Sprintf("%s=%d", name, acc))
+		}
+	}
+	sort.Strings(entries)
+	return fmt.Sprintf("ro=%t;%s", readOnly, strings.Join(entries, ","))
+}
+
+// parseRawQueryScoping parses rawQuery strictly with url.ParseQuery (never
+// discarding malformed percent-escapes or semicolons the way URL.Query does)
+// and validates optional toolsets and read_only scoping parameters on /mcp.
+// When hasScoping is false, the request uses the pool's default server. A
+// non-empty errMsg indicates a 400 Bad Request.
+func parseRawQueryScoping(rawQuery string) (hasScoping bool, queryAccess map[string]tools.ToolAccess, queryRO bool, errMsg string) {
+	if rawQuery == "" {
+		return false, nil, false, ""
+	}
+	q, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return true, nil, false, "invalid URL query string"
+	}
+	return parseQueryScoping(q)
+}
+
+func parseQueryScoping(q url.Values) (hasScoping bool, queryAccess map[string]tools.ToolAccess, queryRO bool, errMsg string) {
+	if len(q) == 0 {
+		return false, nil, false, ""
+	}
+	var unknownKeys []string
+	for k := range q {
+		if k != "read_only" && k != "toolsets" {
+			unknownKeys = append(unknownKeys, k)
+		}
+	}
+	if len(unknownKeys) > 0 {
+		sort.Strings(unknownKeys)
+		return true, nil, false, fmt.Sprintf("unsupported query parameter %q on /mcp (allowed: toolsets, read_only)", unknownKeys[0])
+	}
+	valsRO, hasRO := q["read_only"]
+	valsTS, hasTS := q["toolsets"]
+	if !hasRO && !hasTS {
+		return false, nil, false, ""
+	}
+	if hasRO {
+		if len(valsRO) != 1 {
+			return true, nil, false, "invalid read_only query parameter"
+		}
+		switch strings.ToLower(strings.TrimSpace(valsRO[0])) {
+		case "true", "1":
+			queryRO = true
+		case "false", "0":
+			queryRO = false
+		default:
+			return true, nil, false, fmt.Sprintf("invalid read_only query parameter %q (use true, false, 1, or 0)", valsRO[0])
+		}
+	}
+
+	rawToolsets := ""
+	if hasTS {
+		var parts []string
+		for _, v := range valsTS {
+			for part := range strings.SplitSeq(v, ",") {
+				p := strings.TrimSpace(part)
+				if p != "" {
+					parts = append(parts, p)
+				}
+			}
+		}
+		if len(parts) == 0 {
+			return true, nil, false, "toolsets query parameter must name at least one valid toolset"
+		}
+		rawToolsets = strings.Join(parts, ",")
+	}
+
+	access, unknown := tools.ResolveToolAccess(rawToolsets, queryRO)
+	if len(unknown) > 0 {
+		return true, nil, false, fmt.Sprintf("unknown toolset %q in toolsets query parameter", unknown[0])
+	}
+	return true, access, queryRO, ""
+}
+
+func (p *serverPool) entryForRequest(r *http.Request) (pooledEntry, string) {
+	hasScoping, queryAccess, queryRO, errMsg := parseRawQueryScoping(r.URL.RawQuery)
+	if errMsg != "" {
+		return pooledEntry{}, errMsg
+	}
+	if !hasScoping {
+		return p.defaultEntry, ""
+	}
+
+	narrowed := tools.NarrowToolAccess(p.baseAccess, queryAccess)
+	effectiveRO := p.baseCfg.ReadOnly || queryRO || !tools.HasWriteAccess(narrowed)
+	key := accessCacheKey(narrowed, effectiveRO)
+
+	p.mu.Lock()
+	if entry, ok := p.entries[key]; ok {
+		p.mu.Unlock()
+		return entry, ""
+	}
+	p.mu.Unlock()
+
+	narrowCfg := p.baseCfg
+	narrowCfg.ReadOnly = effectiveRO
+	srv := newServerWithAccess(narrowCfg, narrowed, p.client, p.tracker, p.ledger)
+	built := pooledEntry{
+		server:  srv,
+		handler: newHTTPHandler(srv),
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if entry, ok := p.entries[key]; ok {
+		return entry, ""
+	}
+	p.entries[key] = built
+	return built, ""
+}
+
+func (p *serverPool) forRequest(r *http.Request) *mcp.Server {
+	entry, _ := p.entryForRequest(r)
+	return entry.server
+}
+
+func (p *serverPool) allServers() []*mcp.Server {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]*mcp.Server, 0, len(p.entries))
+	for _, entry := range p.entries {
+		out = append(out, entry.server)
+	}
+	return out
+}
+
+func (p *serverPool) totalSessions() int {
+	total := 0
+	for _, srv := range p.allServers() {
+		for range srv.Sessions() {
+			total++
+		}
+	}
+	return total
 }
 
 // staticTTL is how long a client may cache what does not change while the
@@ -150,34 +363,27 @@ const zoneLayout = "MST (UTC-07:00)"
 
 // serverInstructions returns the instructions the server gives a client that
 // connects at now.
-func serverInstructions(now time.Time) string {
+func serverInstructions(now time.Time, readOnly bool) string {
+	safetySection := `Write safety:
+- Gated actions (named in a tool's confirm field): once target IDs are known (search/browse first; never guess IDs), call WITHOUT confirm instead of asking in plain text first, and never set confirm to true before CONFIRMATION REQUIRED. Form-elicitation clients prompt the user directly; other clients return CONFIRMATION REQUIRED—present that server preview to the user, and set confirm to true only on a follow-up turn after they approve it.
+- Ungated writes (creating users/playlists/collections/timers, scans, non-replacing refreshes, single subtitle/lyric/image downloads or uploads, adding playlist/collection items): describe the change and get explicit user agreement before calling.`
+	if readOnly {
+		safetySection = `Read-only mode:
+- Only read-only tools and actions are enabled on this connection, so all write, edit, delete, scan, and power actions are omitted and disabled. Fulfill any read-only parts of the user's request once, then clearly state that the requested write or destructive actions cannot be performed because read-only mode is enabled.`
+	}
 	return fmt.Sprintf(`Server date/time when this connection began: %s. Dates such as 2024-01-31 in tool inputs are read in this time zone, except min_premiere_date and max_premiere_date, which Jellyfin reads in UTC, and tool results give dates and times in it. Use this date as "today" for date calculations unless you know a more current one.
 
-You are connected to a live Jellyfin media server through the tools below. This IS the user's media library. When they ask about movies, shows, music, what they've watched, what's unwatched, or want recommendations, USE THESE TOOLS to query their actual library. Never say you lack access or ask for credentials. Even if the user doesn't say "Jellyfin", any request about their media collection or viewing history should go through these tools. Always recommend from the user's own library. Do NOT fetch external sites such as IMDb or TMDB for suggestions when the user's Jellyfin library can answer the question.
+You are connected to the user's live Jellyfin media server. Always query these tools for movies, shows, music, watch history, or recommendations (even when the user doesn't mention "Jellyfin"), recommend from their library rather than external sites, and never claim you lack access or ask for credentials.
 
-IMPORTANT: Safety rules for write operations:
-- Before calling an action that modifies data and that its tool's confirm description does not name (metadata edits, user creation, library scans, subtitle downloads, playlist additions, image downloads), ALWAYS describe the intended action to the user and get explicit agreement before proceeding.
-- Actions that a tool's confirm description names (deletes, restart, shutdown, uninstall, playlist removals, batch operations) confirm with the user themselves, so call them WITHOUT confirm. The user's app then asks the user directly, or the tool returns a CONFIRMATION REQUIRED warning: present it, and call again with confirm=true only after the user agrees to it. Never set confirm=true on a first call.
+%s`, now.Format("2006-01-02 15:04 "+zoneLayout), safetySection) + `
 
-Key conventions:
-- Most tools require item IDs (UUIDs). Use jellyfin_search or jellyfin_browse to discover items first, then pass their IDs to other tools.
-- Genre/attribute filtering: use jellyfin_browse with genre, year, studio, is_played, is_hd, is_4k, min_community_rating, and so on. Do NOT use jellyfin_search with genre names or resolutions as keywords.
-- Compact and detailed results: search, browse, recommendations, and analytics tools return compact item summaries (name, type, year, overview truncated to 200 chars, community rating, runtime, play status, and video resolution in search and browse). Fields like genres, studios, cast/crew, provider IDs, taglines, and media stream details are only in jellyfin_get_item results. Do not assess metadata completeness from compact results, because the compact view leaves those fields out even when the item has them. The exception is overview in jellyfin_browse and jellyfin_search results, which is present whenever the item has one.
-- Viewing history ("what did I watch", "when did I last watch X"): jellyfin_system_info action=playback_history lists each play with its time, and jellyfin_browse with is_played=true and sort_by=DatePlayed lists played items with last_played. For another person ("what did Harper watch", "what hasn't Harper seen"), first find their user_id with jellyfin_users action=list and pass it to either tool; without it, both show the configured user. jellyfin_recommendations action=recently_played lists items marked played.
-- Play state on items: played means the item was finished at least once or marked played by hand; progress is the position saved by the latest play. Both are set when a finished item is being watched again.
-- Download links ("give me a link to download X"): jellyfin_download_link returns the item's page in the Jellyfin web app, where the user downloads with their own account. Give that link. Never construct a download URL yourself, and never say a link cannot be given.
-- Library size and disk space ("how big is my library", "what takes the most space"): jellyfin_analytics action=library_size gives the total size of each media type, and action=size_report ranks the largest items or series. jellyfin_system_info action=storage gives the free space on the server's drives.
-- Troubleshoot issues: jellyfin_system_info action=health_check first; then activity_log and logs/log_file, and jellyfin_tasks action=list for failed tasks.
-- Use prompts for guided multi-step workflows.
+Conventions:
+- Discovery & IDs: Use jellyfin_search (local title/person/studio/genre lookup) or jellyfin_browse (structured filters such as genre, year, resolution, is_played, min_community_rating—never put genres or resolutions into jellyfin_search). parent_id accepts library names or IDs; series_id, playlist_id, and collection_id accept names or IDs; user_id accepts usernames or IDs; session_id accepts session IDs or device names.
+- Compact vs full item data: Search, browse, recommendations, and analytics return compact summaries (overview is included in search/browse when present, truncated to 200 chars). Call jellyfin_get_item for genres, studios, cast/crew, provider IDs, media streams, and external_urls (always include IMDb/TMDb/TVDB links when presenting jellyfin_get_item details).
+- History & play state: Use jellyfin_playback_stats (playback_history for verified plays, played_status for per-user watch state, most_played/unwatched_by_all for household stats), or jellyfin_browse (is_played=true, sort_by=DatePlayed); pass user_id (username or ID) for another user. played=true means finished at least once or marked played; progress is the latest resume position.
+- Downloads, space & diagnostics: Use jellyfin_item_extras action=download_link for web download links (never invent URLs). Use jellyfin_analytics (library_size, size_report) for media sizes and jellyfin_system_info (storage) for free disk space. Troubleshoot with jellyfin_system_info (health_check, activity_log, logs/log_file) and jellyfin_server (list_tasks).
 
-Resources (use for quick lookups without tool calls):
-- jellyfin://server/info, jellyfin://libraries, jellyfin://sessions/now-playing, jellyfin://sessions, jellyfin://items/{itemId}, jellyfin://users/{userId}
-- Dashboard: jellyfin://resume, jellyfin://next-up, jellyfin://favorites, jellyfin://latest, jellyfin://recently-played, jellyfin://users
-- Per-library: jellyfin://libraries/{libraryId}/latest
-- Reference guides: jellyfin://guides/transcoding, jellyfin://guides/file-naming, jellyfin://guides/remote-access, jellyfin://guides/troubleshooting, jellyfin://guides/library-setup, jellyfin://guides/docker, jellyfin://guides/users-and-access, jellyfin://guides/plugins, jellyfin://guides/migration, jellyfin://guides/performance, jellyfin://guides/syncplay
-
-External links:
-- When showing media details from jellyfin_get_item, always include the external_urls links (IMDb, TMDb, TVDB) so the user can navigate to the external page.`, now.Format("2006-01-02 15:04 "+zoneLayout))
+Resources: Read jellyfin:// live resources (server, libraries, sessions, playback queues, users, items) and jellyfin://guides/<topic> reference guides when your client supports MCP resources.`
 }
 
 // runStdio runs the server over stdin/stdout, the subprocess transport MCP
@@ -216,6 +422,17 @@ func newHTTPHandler(server *mcp.Server) http.Handler {
 			return
 		}
 		stateful.ServeHTTP(w, r)
+	})
+}
+
+func newHTTPPoolHandler(pool *serverPool) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		entry, errMsg := pool.entryForRequest(r)
+		if errMsg != "" {
+			http.Error(w, errMsg, http.StatusBadRequest)
+			return
+		}
+		entry.handler.ServeHTTP(w, r)
 	})
 }
 
@@ -276,13 +493,23 @@ func limitLargeBodies(next http.Handler, limit int) http.Handler {
 // header from a client on a protocol before statelessProtocolVersion; every
 // other request either belongs to an existing session or creates none.
 func limitSessions(next http.Handler, server *mcp.Server, limit int) http.Handler {
+	return limitSessionCount(next, func() int {
+		n := 0
+		for range server.Sessions() {
+			n++
+		}
+		return n
+	}, limit)
+}
+
+func limitPoolSessions(next http.Handler, pool *serverPool, limit int) http.Handler {
+	return limitSessionCount(next, pool.totalSessions, limit)
+}
+
+func limitSessionCount(next http.Handler, countSessions func() int, limit int) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.Header.Get("Mcp-Session-Id") == "" && r.Header.Get("MCP-Protocol-Version") < statelessProtocolVersion {
-			n := 0
-			for range server.Sessions() {
-				n++
-			}
-			if n >= limit {
+			if countSessions() >= limit {
 				w.Header().Set("Retry-After", "60")
 				http.Error(w, "too many sessions", http.StatusServiceUnavailable)
 				return
@@ -296,13 +523,20 @@ func limitSessions(next http.Handler, server *mcp.Server, limit int) http.Handle
 // is set and behind cross-origin protection, and an unauthenticated health
 // check at /health.
 func newHTTPMux(server *mcp.Server, token string) http.Handler {
+	return buildHTTPMux(limitSessions(limitLargeBodies(newHTTPHandler(server), maxLargeRequests), server, maxSessions), token)
+}
+
+func newHTTPPoolMux(pool *serverPool, token string) http.Handler {
+	return buildHTTPMux(limitPoolSessions(limitLargeBodies(newHTTPPoolHandler(pool), maxLargeRequests), pool, maxSessions), token)
+}
+
+func buildHTTPMux(handler http.Handler, token string) http.Handler {
 	// Defense-in-depth against cross-site tool execution (CVE-2026-33252): reject
 	// browser cross-site POSTs by checking Origin / Sec-Fetch-Site. Non-browser
 	// clients (MetaMCP, curl) send neither header and pass through unaffected.
 	crossOrigin := http.NewCrossOriginProtection()
 
 	mux := http.NewServeMux()
-	handler := limitSessions(limitLargeBodies(newHTTPHandler(server), maxLargeRequests), server, maxSessions)
 	mux.Handle("/mcp", bearerAuth(crossOrigin.Handler(handler), token))
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -327,9 +561,13 @@ func newHTTPServer(addr string, handler http.Handler) *http.Server {
 	}
 }
 
-// runHTTP runs the server as a Streamable HTTP endpoint.
-func runHTTP(server *mcp.Server, addr, token string) {
-	srv := newHTTPServer(addr, newHTTPMux(server, token))
+// runHTTPPool runs the pooled server as a Streamable HTTP endpoint.
+func runHTTPPool(pool *serverPool, addr, token string) {
+	serveHTTPMux(newHTTPPoolMux(pool, token), addr, token)
+}
+
+func serveHTTPMux(mux http.Handler, addr, token string) {
+	srv := newHTTPServer(addr, mux)
 
 	// Signal handling for graceful shutdown (HTTP only; stdio must never have this)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

@@ -289,16 +289,13 @@ func TestPeople_Persons_SingleRequest(t *testing.T) {
 		},
 	}
 
-	result := callTool(t, mc, "", "jellyfin_people", map[string]any{
-		"action": "persons",
-		"query":  "Person",
-		"limit":  500,
+	result := callTool(t, mc, "", "jellyfin_search", map[string]any{
+		"type":  "Person",
+		"query": "Person",
+		"limit": 500,
 	})
 
-	text := resultText(t, result)
-	if result.IsError {
-		t.Fatalf("unexpected error: %s", text)
-	}
+	out := structured[jf.ItemListOutput](t, result)
 	if len(calls) != 1 {
 		t.Fatalf("got %d /Persons requests, want 1", len(calls))
 	}
@@ -312,16 +309,16 @@ func TestPeople_Persons_SingleRequest(t *testing.T) {
 	if got := p.Get("UserId"); got != "test-user-id" {
 		t.Errorf("UserId = %q, want test-user-id", got)
 	}
-	if got := p.Get("SearchTerm"); got != "Person" {
-		t.Errorf("SearchTerm = %q, want Person", got)
+	if got := p.Get("searchTerm"); got != "Person" {
+		t.Errorf("searchTerm = %q, want Person", got)
 	}
 	// Jellyfin 12 lists music credits among persons; the artists actions
 	// list them on every version.
 	if got := p.Get("ExcludePersonTypes"); got != "Artist,AlbumArtist" {
 		t.Errorf("ExcludePersonTypes = %q, want Artist,AlbumArtist", got)
 	}
-	if !strings.Contains(text, "Found 250 persons:") {
-		t.Errorf("expected 250 persons, got: %.200s", text)
+	if out.Shown != 250 || len(out.Items) != 250 {
+		t.Errorf("expected 250 persons, got shown=%d len=%d", out.Shown, len(out.Items))
 	}
 }
 
@@ -341,14 +338,14 @@ func TestPeople_Persons_ReportsTotal(t *testing.T) {
 		},
 	}
 
-	result := callTool(t, mc, "", "jellyfin_people", map[string]any{
-		"action": "persons",
-		"limit":  2,
+	result := callTool(t, mc, "", "jellyfin_search", map[string]any{
+		"type":  "Person",
+		"limit": 2,
 	})
 
-	text := resultText(t, result)
-	if !strings.Contains(text, "Found 2 persons (of 40 total)") {
-		t.Errorf("expected total record count in result, got: %s", text)
+	out := structured[jf.ItemListOutput](t, result)
+	if out.Shown != 2 || out.TotalCount != 40 || !hasNote(out.Notes, "More results match than are shown") {
+		t.Errorf("expected shown=2 total=40 with more-results note, got: %+v", out)
 	}
 }
 

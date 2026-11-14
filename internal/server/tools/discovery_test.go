@@ -484,7 +484,7 @@ func TestGetItem_NoCollectionsIsAnEmptyList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if text := read.Contents[0].Text; !strings.Contains(text, `"name": "Test Collection"`) {
+	if text := read.Contents[0].Text; !strings.Contains(text, `"name":"Test Collection"`) {
 		t.Errorf("the item resource does not list the collections: %s", text)
 	}
 }
@@ -1058,7 +1058,10 @@ func TestBrowse_GroupBySeriesScans(t *testing.T) {
 	run := func(args map[string]any) ([]url.Values, jf.ItemListOutput) {
 		var scans []url.Values
 		mc := &mockClient{
-			getFunc: func(_ context.Context, _ string, params url.Values, dest any) error {
+			getFunc: func(_ context.Context, endpoint string, params url.Values, dest any) error {
+				if endpoint != "/Items" {
+					return nil
+				}
 				scans = append(scans, params)
 				items := []map[string]any{
 					{"Id": "e1", "SeriesId": "s1", "SeriesName": ""},
@@ -1860,7 +1863,7 @@ func TestDownloadLink_CarriesNoKey(t *testing.T) {
 			}, dest)
 		},
 	}
-	result := callTool(t, mc, "", "jellyfin_download_link", map[string]any{"item_id": "item-1"})
+	result := callTool(t, mc, "", "jellyfin_item_extras", map[string]any{"action": "download_link", "item_id": "item-1"})
 	text := resultText(t, result)
 	if result.IsError {
 		t.Fatal(text)
@@ -1870,17 +1873,17 @@ func TestDownloadLink_CarriesNoKey(t *testing.T) {
 			t.Errorf("result contains %q: %s", banned, text)
 		}
 	}
-	for _, want := range []string{`"web_page": "http://localhost:8096/web/#/details?id=item-1"`, `"file_path": "/media/movies/test-movie.mkv"`, `"file_size_bytes": 1500`, "Download button"} {
+	for _, want := range []string{`"web_page":"http://localhost:8096/web/#/details?id=item-1"`, `"file_path":"/media/movies/test-movie.mkv"`, `"file_size_bytes":1500`, "Download button"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("expected %q in result, got: %s", want, text)
 		}
 	}
 }
 
-// People, artists, and genres are not library items, so a search for one of
+// People, studios, artists, and genres are not library items, so a search for one of
 // those types goes to the endpoint that lists them by name.
 func TestSearch_NameTypesUseTheirOwnEndpoints(t *testing.T) {
-	for typ, endpoint := range map[string]string{"Person": "/Persons", "MusicArtist": "/Artists", "Genre": "/Genres", "Movie": "/Items"} {
+	for typ, endpoint := range map[string]string{"Person": "/Persons", "Studio": "/Studios", "MusicArtist": "/Artists", "Genre": "/Genres", "Movie": "/Items"} {
 		var gotEndpoint string
 		var gotParams url.Values
 		mc := &mockClient{getFunc: func(_ context.Context, endpoint string, params url.Values, dest any) error {

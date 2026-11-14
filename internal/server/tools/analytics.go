@@ -22,12 +22,18 @@ func RegisterAnalyticsTools(server *mcp.Server, client jf.Client, enabled func(s
 			Name:  "jellyfin_analytics",
 			Title: "Analytics",
 			InputSchema: jf.WithEnums[jf.AnalyticsInput](map[string][]any{
-				"action": {"library_stats", "library_size", "size_report", "codec_report", "never_played", "recently_added", "duplicate_check", "played_status"},
+				"action": {"library_stats", "library_size", "size_report", "codec_report", "never_played", "recently_added", "duplicate_check"},
 			}),
-			Description: "Read-only library analytics and reports; set parent_id to scope to one library. " +
-				"codec_report counts codecs, containers, HDR, and resolution tiers (default Movie; pass type=Episode for TV or Audio for music); use jellyfin_browse to list matching items or shows.",
-			Annotations: AnnotReadOnly,
+			OutputSchema: jf.SchemaFor[jf.AnalyticsOutput](),
+			Description:  "Generate library catalog reports: item counts, disk usage, largest titles, codec/HDR/resolution distributions, unplayed or recently added items, and duplicates.",
+			Annotations:  AnnotReadOnly,
 		}, func(ctx context.Context, req *mcp.CallToolRequest, args jf.AnalyticsInput) (*mcp.CallToolResult, *jf.AnalyticsOutput, error) {
+			switch args.Action {
+			case "library_stats", "codec_report", "recently_added", "duplicate_check", "library_size", "size_report":
+				if strings.TrimSpace(args.UserID) != "" {
+					return jf.ErrResult("user_id is only supported for never_played; other jellyfin_analytics actions report catalog-wide totals (use jellyfin_browse with user_id for per-user library views)."), nil, nil
+				}
+			}
 			var codecType string
 			if args.Action == "codec_report" {
 				var errRes *mcp.CallToolResult
@@ -40,6 +46,13 @@ func RegisterAnalyticsTools(server *mcp.Server, client jf.Client, enabled func(s
 			userID, err := client.GetUserID(ctx)
 			if err != nil {
 				return jf.ErrResult("Jellyfin error: %v", err), nil, nil
+			}
+			if args.ParentID != "" {
+				parentID, err := jf.ResolveLibraryID(ctx, client, args.ParentID)
+				if err != nil {
+					return jf.ResolveErrResult(err), nil, nil
+				}
+				args.ParentID = parentID
 			}
 
 			switch args.Action {
@@ -170,9 +183,13 @@ func RegisterAnalyticsTools(server *mcp.Server, client jf.Client, enabled func(s
 				return nil, out, nil
 
 			case "never_played":
-				maxItems := jf.ClampInt(args.Limit, 500, jf.MaxLimitCap)
+				targetUser, err := jf.EffectiveUserID(ctx, client, args.UserID)
+				if err != nil {
+					return jf.ResolveErrResult(err), nil, nil
+				}
+				maxItems := jf.ClampInt(args.Limit, 50, jf.MaxLimitCap)
 				params := url.Values{
-					"UserId":    {userID},
+					"UserId":    {targetUser},
 					"IsPlayed":  {"false"},
 					"IsMissing": {"false"},
 					"Recursive": {"true"},
@@ -209,7 +226,7 @@ func RegisterAnalyticsTools(server *mcp.Server, client jf.Client, enabled func(s
 				if days <= 0 {
 					days = 30
 				}
-				maxItems := jf.ClampInt(args.Limit, 500, jf.MaxLimitCap)
+				maxItems := jf.ClampInt(args.Limit, 50, jf.MaxLimitCap)
 				params := url.Values{
 					"UserId":    {userID},
 					"Recursive": {"true"},
@@ -373,89 +390,6 @@ func RegisterAnalyticsTools(server *mcp.Server, client jf.Client, enabled func(s
 				}
 				return nil, out, nil
 
-			case "played_status":
-				// 1. Validate item_id
-				if args.ItemID == "" {
-					return jf.ErrResult("item_id is required for played_status"), nil, nil
-				}
-
-				// 2. Fetch all users
-				var users []map[string]any
-				if err := client.Get(ctx, "/Users", nil, &users); err != nil {
-					return jf.ErrResult("Jellyfin API error: %v", err), nil, nil
-				}
-
-				// 3. Fetch item metadata using the authenticated user
-				var item map[string]any
-				itemEndpoint := fmt.Sprintf("/Items/%s", jf.SanitizeID(args.ItemID))
-				if err := client.Get(ctx, itemEndpoint, url.Values{"UserId": {userID}}, &item); err != nil {
-					return jf.ErrResult("Jellyfin API error: %v", err), nil, nil
-				}
-				itemName := jf.GetString(item, "Name")
-				itemType := jf.GetString(item, "Type")
-
-				// 4. If Series, get total episode count via Limit=0 query
-				totalEpisodes := 0
-				if itemType == "Series" {
-					epParams := url.Values{
-						"UserId":           {userID},
-						"ParentId":         {args.ItemID},
-						"IncludeItemTypes": {"Episode"},
-						"Recursive":        {"true"},
-						"Limit":            {"0"},
-						"IsMissing":        {"false"},
-					}
-					var epResult map[string]any
-					if err := client.Get(ctx, "/Items", epParams, &epResult); err == nil {
-						totalEpisodes = jf.GetInt(epResult, "TotalRecordCount")
-					}
-				}
-
-				// 5. Query each non-disabled user's watch data
-				userResults := make([]jf.PlayedStatusUser, 0, len(users))
-				var unread []string
-				for _, u := range users {
-					if policy := jf.ToMap(u["Policy"]); policy != nil && jf.GetBool(policy, "IsDisabled") {
-						continue
-					}
-					uid := jf.GetString(u, "Id")
-					name := jf.GetString(u, "Name")
-
-					var userItem map[string]any
-					userEndpoint := fmt.Sprintf("/Items/%s", jf.SanitizeID(args.ItemID))
-					if err := client.Get(ctx, userEndpoint, url.Values{"UserId": {uid}}, &userItem); err != nil {
-						unread = append(unread, name)
-						continue
-					}
-
-					entry := jf.PlayedStatusUser{Name: name}
-					if ud := jf.ToMap(userItem["UserData"]); ud != nil {
-						entry.Played = jf.GetBool(ud, "Played")
-						if pc := jf.GetInt(ud, "PlayCount"); pc > 0 {
-							entry.PlayCount = pc
-						}
-						if lp := jf.GetString(ud, "LastPlayedDate"); lp != "" {
-							entry.LastPlayed = jf.LocalDate(lp)
-						}
-						if itemType == "Series" && totalEpisodes > 0 {
-							played := totalEpisodes - jf.GetInt(ud, "UnplayedItemCount")
-							entry.EpisodesPlayed = &played
-							entry.TotalEpisodes = totalEpisodes
-						}
-					}
-					userResults = append(userResults, entry)
-				}
-				return nil, &jf.AnalyticsOutput{
-					ItemSummary: &jf.PlayedStatusItem{
-						ID:            args.ItemID,
-						Name:          itemName,
-						Type:          itemType,
-						TotalEpisodes: totalEpisodes,
-					},
-					Users: &userResults,
-					Notes: unreadUsersNote(unread),
-				}, nil
-
 			case "size_report":
 				itemType := args.Type
 				if itemType == "" {
@@ -553,7 +487,7 @@ func RegisterAnalyticsTools(server *mcp.Server, client jf.Client, enabled func(s
 				return nil, out, nil
 
 			default:
-				return jf.ErrResult("Invalid action '%s'. Valid actions: library_stats, codec_report, never_played, recently_added, duplicate_check, library_size, size_report, played_status", args.Action), nil, nil
+				return jf.ErrResult("Invalid action '%s'. Valid actions: library_stats, codec_report, never_played, recently_added, duplicate_check, library_size, size_report", args.Action), nil, nil
 			}
 		})
 	}

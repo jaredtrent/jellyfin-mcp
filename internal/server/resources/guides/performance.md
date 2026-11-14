@@ -26,12 +26,12 @@ A transcode happens when the client can't play the file's container, video codec
 
 Jellyfin stores everything except media and images in `jellyfin.db`, in the data directory: `/config/data` in the official container and `/var/lib/jellyfin/data` on Debian and Ubuntu. On Jellyfin 12, `database.xml` can place it elsewhere. Keep it on a local SSD, never on a network share or on ZFS over mechanical disks. On ZFS, give its dataset a record size of 4K or 8K.
 
-The database runs in WAL mode. Jellyfin 12 adds an Optimize Database scheduled task that checkpoints the WAL and runs `VACUUM`, so there is no need to run `sqlite3` by hand. Run it from `jellyfin_tasks` after deleting a large amount of media. For database locked errors during scans, see jellyfin://guides/troubleshooting.
+The database runs in WAL mode. Jellyfin 12 adds an Optimize Database scheduled task that checkpoints the WAL and runs `VACUUM`, so there is no need to run `sqlite3` by hand. Run it with `jellyfin_server action=start_task` after deleting a large amount of media. For database locked errors during scans, see jellyfin://guides/troubleshooting.
 
 ## Cache and Metadata
 
 - **Transcodes** live under the cache directory and are removed when a session ends and by the Clear Transcodes Folder task. The folder needs roughly as much space as the media being transcoded.
-- **Other cache** is cleared by the Clear Cache Folder task. Both tasks are listed by `jellyfin_tasks action=list`.
+- **Other cache** is cleared by the Clear Cache Folder task. Both tasks are listed by `jellyfin_server action=list_tasks`.
 - **Metadata images**, such as posters, backdrops, and chapter images, live in `/config/metadata`. Neither task removes them, because they aren't cache. They grow with the library.
 
 ## Storage and Network
@@ -42,7 +42,7 @@ Media can stay on mechanical disks, because streaming reads sequentially. Over N
 
 - `jellyfin_system_info action=info` reports the server version. It doesn't report hardware, so ask which CPU or GPU the server uses.
 - `jellyfin_sessions action=list` shows who is playing what on which client, whether each stream plays directly, remuxes, or transcodes, and why it transcodes. It doesn't show whether the transcode runs on the CPU or GPU; the `encoding` config and the `FFmpeg.*.log` files do.
-- `jellyfin_analytics action=codec_report` finds the codecs and resolutions that force transcoding, for movies by default or TV episodes with `type=Episode`. `jellyfin_browse` with `is_4k`, `is_hd`, `min_width`, or `group_by_series` lists the matching titles or shows.
+- `jellyfin_analytics action=codec_report` finds the codecs and resolutions that force transcoding, for movies by default or TV episodes with `type=Episode`. `jellyfin_browse` with `resolution` (`sd`, `720p`, `1080p`, `1440p`, `4k`, `8k`), `is_4k`, `is_hd`, `min_width`, or `group_by_series` lists the matching titles or shows.
 - `jellyfin_item_extras action=playback_info` checks whether one item plays directly.
 - `jellyfin_system_info action=log_file` shows FFmpeg errors and warnings.
 

@@ -122,7 +122,7 @@ func TestAnalytics_PlayedStatus_PerUserItemLookup(t *testing.T) {
 		},
 	}
 
-	result := callTool(t, mc, "", "jellyfin_analytics", map[string]any{
+	result := callTool(t, mc, "", "jellyfin_playback_stats", map[string]any{
 		"action":  "played_status",
 		"item_id": "series-1",
 	})
@@ -146,7 +146,7 @@ func TestAnalytics_PlayedStatus_PerUserItemLookup(t *testing.T) {
 		}
 	}
 
-	out := structured[jf.AnalyticsOutput](t, result)
+	out := structured[jf.PlaybackStatsOutput](t, result)
 	if out.Users == nil || len(*out.Users) != 2 {
 		t.Fatalf("users = %+v, want two", out.Users)
 	}
@@ -228,7 +228,15 @@ func TestAnalytics_RecentlyAdded_UndatedItemDoesNotStop(t *testing.T) {
 
 func TestAnalytics_RecentlyAdded_HintAtTheLimitCap(t *testing.T) {
 	lib := recentLibrary(600, 700)
-	result := callTool(t, lib.client(), "", "jellyfin_analytics", map[string]any{"action": "recently_added"})
+	defOut := structured[jf.AnalyticsOutput](t, callTool(t, lib.client(), "", "jellyfin_analytics", map[string]any{"action": "recently_added"}))
+	if defOut.TotalCount == nil || *defOut.TotalCount != 600 || defOut.Shown == nil || *defOut.Shown != 50 {
+		t.Errorf("default limit: want total_count 600 and shown 50, got %+v", defOut)
+	}
+	if !hasNote(defOut.Notes, "Increase limit (currently 50, at most 500)") {
+		t.Errorf("default limit: expected Increase limit note, got: %v", defOut.Notes)
+	}
+
+	result := callTool(t, lib.client(), "", "jellyfin_analytics", map[string]any{"action": "recently_added", "limit": jf.MaxLimitCap})
 	out := structured[jf.AnalyticsOutput](t, result)
 	if out.TotalCount == nil || *out.TotalCount != 600 || out.Shown == nil || *out.Shown != 500 || out.Items == nil || len(*out.Items) != 500 {
 		t.Errorf("want total_count 600 and shown 500, got %+v", out)
@@ -246,6 +254,7 @@ func TestAnalytics_RecentlyAdded_ReportsTheScanBound(t *testing.T) {
 	result := callTool(t, lib.client(), "", "jellyfin_analytics", map[string]any{
 		"action": "recently_added",
 		"days":   365,
+		"limit":  jf.MaxLimitCap,
 	})
 	out := structured[jf.AnalyticsOutput](t, result)
 	if out.TotalCount == nil || *out.TotalCount != jf.DefaultMaxItems || !out.TotalIsLowerBound {
@@ -274,7 +283,7 @@ func TestAnalytics_PlayedStatus_QueryValues(t *testing.T) {
 		},
 	}
 
-	result := callTool(t, mc, "", "jellyfin_analytics", map[string]any{
+	result := callTool(t, mc, "", "jellyfin_playback_stats", map[string]any{
 		"action":  "played_status",
 		"item_id": "series 1",
 	})

@@ -282,7 +282,7 @@ func newCheckClient(t *testing.T, version string, ratingLimit any, noUser bool) 
 		case r.URL.Path == "/System/Info/Public" && version != "":
 			_ = json.NewEncoder(w).Encode(map[string]any{"Version": version})
 		case r.URL.Path == "/Users/user-1" && !noUser:
-			_ = json.NewEncoder(w).Encode(map[string]any{"Id": "user-1", "Policy": map[string]any{"MaxParentalRating": ratingLimit}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"Id": "user-1", "Name": "Kid Account", "Policy": map[string]any{"MaxParentalRating": ratingLimit}})
 		default:
 			http.Error(w, "unavailable", http.StatusServiceUnavailable)
 		}
@@ -315,7 +315,7 @@ func TestCheckPlaylistEdit(t *testing.T) {
 		{name: "duplicate append on 12", entries: playlistEntries("b,a,b"), edit: PlaylistEdit{Remove: []string{"b"}, Append: []string{"b", "b"}}, version: "12.1.0"},
 		{name: "duplicate append on 10.11", entries: playlistEntries("b,a,b"), edit: PlaylistEdit{Remove: []string{"b"}, Append: []string{"b", "b"}}, version: "10.11.11", wantErr: "Jellyfin 10.11.11 keeps only one entry"},
 		{name: "duplicate append, version unknown", entries: playlistEntries("b,a,b"), edit: PlaylistEdit{Remove: []string{"b"}, Append: []string{"b", "b"}}, wantErr: "could not be read"},
-		{name: "full rebuild with a rating limit on 12", entries: playlistEntries("a,b,a"), edit: rebuildAll, version: "12.1.0", ratingLimit: 10, wantErr: "parental rating limit"},
+		{name: "full rebuild with a rating limit on 12", entries: playlistEntries("a,b,a"), edit: rebuildAll, version: "12.1.0", ratingLimit: 10, wantErr: "'Kid Account' has a parental rating limit"},
 		{name: "full rebuild, rating limit unreadable", entries: playlistEntries("a,b,a"), edit: rebuildAll, version: "12.1.0", noUser: true, wantErr: "could not be read to check their parental rating limit"},
 		{name: "full rebuild without a rating limit on 12", entries: playlistEntries("a,b,a"), edit: rebuildAll, version: "12.1.0"},
 		{name: "full rebuild with a rating limit on 10.11", entries: playlistEntries("a,b,a"), edit: rebuildAll, version: "10.11.11", ratingLimit: 10},

@@ -27,7 +27,7 @@ type typedCall struct {
 	also []string
 }
 
-// typedCalls covers every action of the eight typed tools.
+// typedCalls covers every action of the nine typed tools.
 var typedCalls = []typedCall{
 	{tool: "jellyfin_libraries", want: map[string]any{"count": float64(0), "libraries": []any{}}},
 	{tool: "jellyfin_search", args: map[string]any{"query": "Test"}, want: emptyPage()},
@@ -53,7 +53,10 @@ var typedCalls = []typedCall{
 	{tool: "jellyfin_analytics", args: map[string]any{"action": "never_played"}, want: map[string]any{"items": []any{}, "total_count": float64(0), "shown": float64(0)}},
 	{tool: "jellyfin_analytics", args: map[string]any{"action": "recently_added"}, want: map[string]any{"items": []any{}, "total_count": float64(0), "shown": float64(0), "days": float64(30)}},
 	{tool: "jellyfin_analytics", args: map[string]any{"action": "duplicate_check"}, want: map[string]any{"duplicates": []any{}}},
-	{tool: "jellyfin_analytics", args: map[string]any{"action": "played_status", "item_id": "item-1"}, want: map[string]any{"users": []any{}}, also: []string{"item_summary"}},
+	{tool: "jellyfin_playback_stats", args: map[string]any{"action": "playback_history"}, want: map[string]any{"history": []any{}, "total_count": float64(0), "shown": float64(0)}},
+	{tool: "jellyfin_playback_stats", args: map[string]any{"action": "played_status", "item_id": "item-1"}, want: map[string]any{"users": []any{}}, also: []string{"item_summary"}},
+	{tool: "jellyfin_playback_stats", args: map[string]any{"action": "most_played"}, want: map[string]any{"most_played": []any{}, "total_count": float64(0), "shown": float64(0)}},
+	{tool: "jellyfin_playback_stats", args: map[string]any{"action": "unwatched_by_all"}, want: map[string]any{"unwatched": []any{}, "total_count": float64(0), "shown": float64(0)}},
 	{tool: "jellyfin_tv_shows", args: map[string]any{"action": "seasons", "series_id": "series-1"}, want: map[string]any{"seasons": []any{}}},
 	{tool: "jellyfin_tv_shows", args: map[string]any{"action": "episodes", "series_id": "series-1", "season_number": 1}, want: map[string]any{"episodes": []any{}}},
 	{tool: "jellyfin_tv_shows", args: map[string]any{"action": "next_up"}, want: map[string]any{"next_up": []any{}}},
@@ -77,9 +80,10 @@ var outputKeys = map[string][]string{
 	"jellyfin_recommendations": {"items", "categories", "total_count"},
 	"jellyfin_analytics": {
 		"stats", "unread_types", "total_size_gb", "total_size_mb", "by_type", "size_report_type", "size_report", "codec_report",
-		"items", "total_count", "total_is_lower_bound", "shown", "days", "undated_count", "duplicates", "item_summary", "users",
+		"items", "total_count", "total_is_lower_bound", "shown", "days", "undated_count", "duplicates",
 	},
-	"jellyfin_tv_shows": {"seasons", "episodes", "next_up"},
+	"jellyfin_playback_stats": {"history", "item_summary", "users", "most_played", "unwatched", "total_count", "shown"},
+	"jellyfin_tv_shows":       {"seasons", "episodes", "next_up"},
 	"jellyfin_sessions": {"sessions", "resume"},
 }
 
@@ -131,6 +135,15 @@ func fixtureClient(populated bool) *mockClient {
 				user["Policy"] = map[string]any{"IsDisabled": true}
 			}
 			return jsonInto([]map[string]any{user}, dest)
+		case endpoint == "/System/ActivityLog/Entries":
+			entries := []map[string]any{}
+			if populated {
+				entries = append(entries,
+					map[string]any{"Type": "VideoPlaybackStopped", "UserId": "test-user-id", "ItemId": "item-1"},
+					map[string]any{"Type": "VideoPlaybackStopped", "UserId": "test-user-id", "ItemId": "item-2"},
+				)
+			}
+			return jsonInto(map[string]any{"Items": entries, "TotalRecordCount": len(entries)}, dest)
 		case endpoint == "/Library/VirtualFolders":
 			libs := []map[string]any{}
 			if populated {

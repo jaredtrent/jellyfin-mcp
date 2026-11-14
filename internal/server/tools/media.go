@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"sort"
@@ -11,6 +12,37 @@ import (
 
 	jf "github.com/jaredtrent/jellyfin-mcp/internal/jellyfin"
 )
+
+func fetchSeriesSeasons(ctx context.Context, client jf.Client, userID, seriesID, fields string) ([]any, error) {
+	params := url.Values{
+		"UserId":           {userID},
+		"ParentId":         {seriesID},
+		"IncludeItemTypes": {"Season"},
+	}
+	if fields != "" {
+		params.Set("Fields", fields)
+	}
+	var result map[string]any
+	err := client.Get(ctx, "/Items", params, &result)
+	if err != nil && !jf.IsJellyfinID(seriesID) {
+		var apiErr *jf.APIError
+		if errors.As(err, &apiErr) && (apiErr.StatusCode == 400 || apiErr.StatusCode == 404) {
+			resolvedID, resErr := jf.ResolveSeriesID(ctx, client, userID, seriesID)
+			if resErr != nil {
+				return nil, resErr
+			}
+			if resolvedID != seriesID {
+				params.Set("ParentId", resolvedID)
+				result = nil
+				err = client.Get(ctx, "/Items", params, &result)
+			}
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	return jf.ToSlice(result["Items"]), nil
+}
 
 func RegisterMediaTools(server *mcp.Server, client jf.Client, enabled func(string, *mcp.ToolAnnotations) bool) {
 
@@ -22,14 +54,13 @@ func RegisterMediaTools(server *mcp.Server, client jf.Client, enabled func(strin
 			InputSchema: jf.WithEnums[jf.TVShowsInput](map[string][]any{
 				"action": {"seasons", "episodes", "next_up"},
 			}),
-			Description: "Navigate TV show structure: list 'seasons' (with episode counts), 'episodes' in one season, or the 'next_up' unplayed episode. " +
-				"Get series_id from jellyfin_search (type='Series') or jellyfin_browse. " +
-				"To filter episodes across a series or library instead of paging season by season, use jellyfin_browse with type='Episode' (and parent_id or group_by_series=true).",
-			Annotations: AnnotReadOnly,
+			OutputSchema: jf.SchemaFor[jf.TVShowsOutput](),
+			Description:  "List seasons of a TV series, episodes in a season, or next-up unplayed episodes (use jellyfin_browse with type='Episode' for cross-season filtering).",
+			Annotations:  AnnotReadOnly,
 		}, func(ctx context.Context, req *mcp.CallToolRequest, args jf.TVShowsInput) (*mcp.CallToolResult, *jf.TVShowsOutput, error) {
-			userID, err := client.GetUserID(ctx)
+			userID, err := jf.EffectiveUserID(ctx, client, args.UserID)
 			if err != nil {
-				return jf.ErrResult("Jellyfin error: %v", err), nil, nil
+				return jf.ResolveErrResult(err), nil, nil
 			}
 
 			switch args.Action {
@@ -37,17 +68,10 @@ func RegisterMediaTools(server *mcp.Server, client jf.Client, enabled func(strin
 				if args.SeriesID == "" {
 					return jf.ErrResult("series_id is required for 'seasons' action. Use jellyfin_search with type 'Series' to find the series ID."), nil, nil
 				}
-				params := url.Values{
-					"UserId":           {userID},
-					"ParentId":         {args.SeriesID},
-					"IncludeItemTypes": {"Season"},
-					"Fields":           {"ChildCount"},
+				rawItems, err := fetchSeriesSeasons(ctx, client, userID, args.SeriesID, "ChildCount")
+				if err != nil {
+					return jf.ResolveErrResult(err), nil, nil
 				}
-				var result map[string]any
-				if err := client.Get(ctx, "/Items", params, &result); err != nil {
-					return jf.ErrResult("Jellyfin API error: %v", err), nil, nil
-				}
-				rawItems := jf.ToSlice(result["Items"])
 				seasons := make([]jf.SeasonInfo, 0, len(rawItems))
 				for _, raw := range rawItems {
 					m := jf.ToMap(raw)
@@ -70,18 +94,12 @@ func RegisterMediaTools(server *mcp.Server, client jf.Client, enabled func(strin
 
 				jf.ReportProgress(ctx, req, 0, 2, "Finding season...")
 
-				// Find season by number
-				params := url.Values{
-					"UserId":           {userID},
-					"ParentId":         {args.SeriesID},
-					"IncludeItemTypes": {"Season"},
-				}
-				var seasonsResult map[string]any
-				if err := client.Get(ctx, "/Items", params, &seasonsResult); err != nil {
-					return jf.ErrResult("Jellyfin API error: %v", err), nil, nil
+				seasonItems, err := fetchSeriesSeasons(ctx, client, userID, args.SeriesID, "")
+				if err != nil {
+					return jf.ResolveErrResult(err), nil, nil
 				}
 				var seasonID string
-				for _, s := range jf.ToSlice(seasonsResult["Items"]) {
+				for _, s := range seasonItems {
 					m := jf.ToMap(s)
 					if jf.GetInt(m, "IndexNumber") == *args.SeasonNumber {
 						seasonID = jf.GetString(m, "Id")
@@ -94,8 +112,7 @@ func RegisterMediaTools(server *mcp.Server, client jf.Client, enabled func(strin
 
 				jf.ReportProgress(ctx, req, 1, 2, "Fetching episodes...")
 
-				// Get episodes
-				params = url.Values{
+				params := url.Values{
 					"UserId":           {userID},
 					"ParentId":         {seasonID},
 					"IncludeItemTypes": {"Episode"},
@@ -126,13 +143,17 @@ func RegisterMediaTools(server *mcp.Server, client jf.Client, enabled func(strin
 				return nil, &jf.TVShowsOutput{Episodes: &episodes}, nil
 
 			case "next_up":
-				maxItems := jf.ClampInt(args.Limit, 100, jf.MaxLimitCap)
+				maxItems := jf.ClampInt(args.Limit, 25, jf.MaxLimitCap)
 				params := url.Values{
 					"UserId": {userID},
 					"Fields": {"Overview"},
 				}
 				if args.SeriesID != "" {
-					params.Set("SeriesId", args.SeriesID)
+					resolvedSeries, err := jf.ResolveSeriesID(ctx, client, userID, args.SeriesID)
+					if err != nil {
+						return jf.ResolveErrResult(err), nil, nil
+					}
+					params.Set("SeriesId", resolvedSeries)
 				}
 				rawItems, total, err := jf.FetchAllPages(ctx, client, "/Shows/NextUp", params, maxItems)
 				if err != nil {
@@ -155,11 +176,7 @@ func RegisterMediaTools(server *mcp.Server, client jf.Client, enabled func(strin
 			InputSchema: jf.WithEnums[jf.MusicInput](map[string][]any{
 				"action": {"artists", "album_artists", "genres", "instant_mix"},
 			}),
-			Description: "Browse music content: list artists, album artists, music genres, or generate an instant mix playlist from a seed item. " +
-				"Use 'artists' or 'album_artists' to browse the music library with optional name filtering. " +
-				"Use 'genres' to list available music genres. " +
-				"Use 'instant_mix' with an item_id (album, artist, song, or playlist) to generate an auto-playlist of similar tracks. " +
-				"The query parameter filters results by name for artists and genres.",
+			Description: "Browse music artists, album artists, or music genres, or generate an instant mix playlist from a seed item.",
 			Annotations: AnnotReadOnly,
 		}, func(ctx context.Context, req *mcp.CallToolRequest, args jf.MusicInput) (*mcp.CallToolResult, any, error) {
 			limit := jf.ClampInt(args.Limit, 25, jf.MaxLimitCap)
@@ -170,7 +187,7 @@ func RegisterMediaTools(server *mcp.Server, client jf.Client, enabled func(strin
 
 			switch args.Action {
 			case "artists", "album_artists":
-				maxItems := jf.ClampInt(args.Limit, 200, jf.MaxLimitCap)
+				maxItems := jf.ClampInt(args.Limit, 50, jf.MaxLimitCap)
 				endpoint := "/Artists"
 				if args.Action == "album_artists" {
 					endpoint = "/Artists/AlbumArtists"
@@ -217,88 +234,10 @@ func RegisterMediaTools(server *mcp.Server, client jf.Client, enabled func(strin
 			}
 		})
 	}
-
-	// --- jellyfin_people ---
-	if enabled("jellyfin_people", AnnotReadOnly) {
-		mcp.AddTool(server, &mcp.Tool{
-			Name:  "jellyfin_people",
-			Title: "People & Studios",
-			InputSchema: jf.WithEnums[jf.PeopleInput](map[string][]any{
-				"action": {"persons", "studios"},
-			}),
-			Description: "Browse persons (actors, directors, writers) and studios in the Jellyfin library. " +
-				"Use action 'persons' to list or search for people who appear in your media. " +
-				"Use action 'studios' to list production studios. " +
-				"The query parameter filters results by name. Person and studio names can be used with jellyfin_browse to find their media.",
-			Annotations: AnnotReadOnly,
-		}, func(ctx context.Context, req *mcp.CallToolRequest, args jf.PeopleInput) (*mcp.CallToolResult, any, error) {
-			userID, err := client.GetUserID(ctx)
-			if err != nil {
-				return jf.ErrResult("Jellyfin error: %v", err), nil, nil
-			}
-
-			switch args.Action {
-			case "persons":
-				maxItems := jf.ClampInt(args.Limit, 200, jf.MaxLimitCap)
-				// Jellyfin 10.11's /Persons takes no StartIndex, so it cannot be
-				// paged; a single request asks for the whole limit.
-				params := url.Values{
-					"UserId": {userID},
-					"Limit":  {fmt.Sprintf("%d", maxItems)},
-					// Jellyfin 12 lists music credits among persons; on every
-					// version they belong to the artists actions.
-					"ExcludePersonTypes": {"Artist,AlbumArtist"},
-				}
-				if args.Query != "" {
-					params.Set("SearchTerm", args.Query)
-				}
-				var result map[string]any
-				if err := client.Get(ctx, "/Persons", params, &result); err != nil {
-					return jf.ErrResult("Jellyfin API error: %v", err), nil, nil
-				}
-				items := jf.ItemsFrom(result)
-				total := jf.GetInt(result, "TotalRecordCount")
-				msg := fmt.Sprintf("Found %d persons", len(items))
-				if total > len(items) {
-					msg += fmt.Sprintf(" (of %d total)", total)
-				}
-				return jf.TextResult(fmt.Sprintf("%s:\n\n%s", msg, jf.FormatJSON(items))), nil, nil
-
-			case "studios":
-				maxItems := jf.ClampInt(args.Limit, 200, jf.MaxLimitCap)
-				params := url.Values{
-					"UserId": {userID},
-				}
-				if args.Query != "" {
-					params.Set("SearchTerm", args.Query)
-				}
-				rawItems, total, err := jf.FetchAllPages(ctx, client, "/Studios", params, maxItems)
-				if err != nil {
-					return jf.ErrResult("Jellyfin API error: %v", err), nil, nil
-				}
-				items := jf.MediaItemsFrom(rawItems)
-				msg := fmt.Sprintf("Found %d studios", len(items))
-				if total > len(items) {
-					msg += fmt.Sprintf(" (of %d total)", total)
-				}
-				return jf.TextResult(fmt.Sprintf("%s:\n\n%s", msg, jf.FormatJSON(items))), nil, nil
-
-			default:
-				return jf.ErrResult("Invalid action '%s'. Valid actions: persons, studios", args.Action), nil, nil
-			}
-		})
-	}
 }
 
-// handleMusicGenres lists the music genres of every music and music-video
-// library the user can see. /Genres returns music genres only when ParentId
-// names such a library; without it the endpoint returns video genres. The
-// libraries come from the user's views, which apply the user's library access
-// and are never grouped for these collection types, so each view is the
-// library itself. A genre item is global by name, so a genre found in several
-// libraries carries the same Id in each.
 func handleMusicGenres(ctx context.Context, client jf.Client, userID string, args jf.MusicInput) (*mcp.CallToolResult, any, error) {
-	maxItems := jf.ClampInt(args.Limit, 200, jf.MaxLimitCap)
+	maxItems := jf.ClampInt(args.Limit, 50, jf.MaxLimitCap)
 	var views map[string]any
 	if err := client.Get(ctx, "/UserViews", url.Values{"UserId": {userID}}, &views); err != nil {
 		return jf.ErrResult("Jellyfin API error: %v", err), nil, nil

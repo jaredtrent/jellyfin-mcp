@@ -417,13 +417,15 @@ func TestSystemInfo_PlaybackHistory_QueriesItemsWithUserID(t *testing.T) {
 					}},
 					"TotalRecordCount": 1,
 				}, dest)
+			case "/Users":
+				return nil
 			}
 			t.Errorf("unexpected GET %s", endpoint)
 			return nil
 		},
 	}
 
-	result := callTool(t, mc, "", "jellyfin_system_info", map[string]any{
+	result := callTool(t, mc, "", "jellyfin_playback_stats", map[string]any{
 		"action":  "playback_history",
 		"user_id": targetUser,
 	})
@@ -441,7 +443,7 @@ func TestSystemInfo_PlaybackHistory_QueriesItemsWithUserID(t *testing.T) {
 	if itemsParams.Get("Filters") != "IsPlayed" || itemsParams.Get("Recursive") != "true" {
 		t.Errorf("expected played-item filters to be kept, got %v", itemsParams)
 	}
-	if !strings.Contains(text, "Test Movie") || !strings.Contains(text, `"actual_playback": true`) {
+	if !strings.Contains(text, "Test Movie") || !strings.Contains(text, `"actual_playback":true`) {
 		t.Errorf("expected the item to be matched to its playback event, got: %s", text)
 	}
 }
@@ -460,8 +462,8 @@ func TestSystemInfo_PlaybackHistory_LastPlayedInTheServerZone(t *testing.T) {
 			return jsonInto(map[string]any{"Items": []map[string]any{}}, dest)
 		},
 	}
-	text := resultText(t, callTool(t, mc, "", "jellyfin_system_info", map[string]any{"action": "playback_history", "verified_only": false}))
-	if !strings.Contains(text, `"last_played": "2026-03-04T20:30:00-07:00"`) {
+	text := resultText(t, callTool(t, mc, "", "jellyfin_playback_stats", map[string]any{"action": "playback_history", "verified_only": false}))
+	if !strings.Contains(text, `"last_played":"2026-03-04T20:30:00-07:00"`) {
 		t.Errorf("want last_played in the server's zone: %s", text)
 	}
 }
@@ -477,7 +479,7 @@ func TestSystemInfo_PlaybackHistory_DefaultsToCurrentUser(t *testing.T) {
 		},
 	}
 
-	result := callTool(t, mc, "", "jellyfin_system_info", map[string]any{
+	result := callTool(t, mc, "", "jellyfin_playback_stats", map[string]any{
 		"action": "playback_history",
 	})
 
@@ -546,25 +548,21 @@ func TestSystemInfo_PlaybackHistory_MatchesUserIDInAnyForm(t *testing.T) {
 				},
 			}
 
-			result := callTool(t, mc, "", "jellyfin_system_info", map[string]any{
+			result := callTool(t, mc, "", "jellyfin_playback_stats", map[string]any{
 				"action":        "playback_history",
 				"user_id":       supplied,
 				"verified_only": false,
 			})
 
-			text := resultText(t, result)
-			if result.IsError {
-				t.Fatalf("unexpected error: %s", text)
+			out := structured[jf.PlaybackStatsOutput](t, result)
+			actual := map[string]*bool{}
+			for _, e := range *out.History {
+				actual[e.ID] = e.ActualPlayback
 			}
-			actual := map[string]any{}
-			for _, e := range systemInfoEntries(t, text) {
-				id, _ := e["id"].(string)
-				actual[id] = e["actual_playback"]
-			}
-			if actual["item-1"] != true {
+			if actual["item-1"] == nil || !*actual["item-1"] {
 				t.Errorf("item-1 actual_playback = %v, want true for the user's own playback", actual["item-1"])
 			}
-			if actual["item-2"] != false {
+			if actual["item-2"] == nil || *actual["item-2"] {
 				t.Errorf("item-2 actual_playback = %v, want false for another user's playback", actual["item-2"])
 			}
 		})
@@ -760,17 +758,17 @@ func TestSystemInfo_PlaybackHistory_Verification(t *testing.T) {
 			return nil
 		},
 	}
-	text := resultText(t, callTool(t, mc, "", "jellyfin_system_info", map[string]any{"action": "playback_history"}))
-	if !strings.Contains(text, "Test Track") || !strings.Contains(text, `"actual_playback": true`) {
+	text := resultText(t, callTool(t, mc, "", "jellyfin_playback_stats", map[string]any{"action": "playback_history"}))
+	if !strings.Contains(text, "Test Track") || !strings.Contains(text, `"actual_playback":true`) {
 		t.Errorf("want the track verified by its audio playback: %s", text)
 	}
 
 	logErr = errors.New("API error 500: failed")
-	result := callTool(t, mc, "", "jellyfin_system_info", map[string]any{"action": "playback_history"})
+	result := callTool(t, mc, "", "jellyfin_playback_stats", map[string]any{"action": "playback_history"})
 	if !result.IsError || !strings.Contains(resultText(t, result), "Set verified_only=false") {
 		t.Errorf("verified history without the activity log: %s", resultText(t, result))
 	}
-	result = callTool(t, mc, "", "jellyfin_system_info", map[string]any{"action": "playback_history", "verified_only": false})
+	result = callTool(t, mc, "", "jellyfin_playback_stats", map[string]any{"action": "playback_history", "verified_only": false})
 	text = resultText(t, result)
 	if result.IsError || !strings.Contains(text, "Test Track") || strings.Contains(text, `"actual_playback":`) || !strings.Contains(text, "Playback could not be verified") {
 		t.Errorf("unverified history without the activity log: %s", text)

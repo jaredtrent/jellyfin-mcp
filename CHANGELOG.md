@@ -1,5 +1,43 @@
 # Changelog
 
+## Unreleased
+
+Leaner 25-tool surface (~40% fewer context tokens), `<verb>-<noun>` read-only and read-write toolsets, HTTP `/mcp?toolsets=...` query scoping, household playback statistics, resolution filtering and live transcoding details, server-side name resolution, partial config merges, and Go 1.27.4. Thanks to @joshuamkite (#36) and @kou4ben3 (#37) for their pull requests.
+
+### Breaking changes
+
+- **Consolidated from 31 to 25 tools**: Overlapping tools are combined to cut schema overhead while adding `jellyfin_playback_stats` and keeping legacy `--toolsets` names as aliases. If your MCP client filters individual tool or action names, update allowlists for: `jellyfin_play` and `jellyfin_playback_control` (now `jellyfin_playback`, taking `action` instead of `command`); `jellyfin_download_link` (now `jellyfin_item_extras` with `action=download_link`); `jellyfin_people` (now `jellyfin_search` with `type=Person`, `Studio`, or `Genre`); `jellyfin_system_control` and `jellyfin_tasks` (now `jellyfin_server`, with task actions `list_tasks`, `get_task`, `start_task`, `stop_task`, and `set_task_triggers`); `jellyfin_videos` (now `jellyfin_metadata` with `merge_versions` and `split_versions`); `jellyfin_recordings` (now `jellyfin_live_tv`, with `recordings` and `delete_recording`); and `jellyfin_system_info` `playback_history` plus `jellyfin_analytics` `played_status` (now `jellyfin_playback_stats`).
+
+### Added
+
+- **Intent-explicit `<verb>-<noun>` toolsets and HTTP query scoping**: Eight `<verb>-<noun>` toolsets separate strictly read-only groups (`find-media`, `monitor-media`, `monitor-server`) from write-enabled groups (`my-media`, `control-playback`, `manage-media`, `admin-server`, `live-tv`), with legacy group names kept as aliases and `manage-media` exposing a non-admin curator slice (`list_folders`, `scan`, `refresh_item`) of `jellyfin_library_manage`. In `--http` mode, clients such as Open WebUI can append `?toolsets=...` and `?read_only=true` to `/mcp` to narrow a connection's schemas and server instructions without running separate server processes.
+- **Household and per-user playback statistics (`jellyfin_playback_stats`)**: Adds a dedicated read-only playback telemetry tool with typed output covering verified watch history (`playback_history`), per-user watch status on an item (`played_status`, accepting item IDs or titles), household most-played rankings (`most_played`), and titles unwatched by every enabled user (`unwatched_by_all`).
+- **Cross-user media inspection and client IP telemetry**: Pass optional `user_id` (username or user ID) on `jellyfin_browse`, `jellyfin_recommendations`, `jellyfin_tv_shows`, `jellyfin_sessions`, `jellyfin_playback_stats` (`playback_history`), `jellyfin_user_data` (`get_user_data`), `jellyfin_playlists` (`list`, `get`), and `jellyfin_analytics` (`never_played`) to inspect another user's view without changing `JELLYFIN_USER_ID`. Active sessions now report `remote_ip` and `app_version`, and `jellyfin_system_info` `activity_log` includes `short_overview` client IP details.
+- **Browse by video resolution**: Filter movies, episodes, and videos by aspect-ratio-aware resolution tier (`sd`, `720p`, `1080p`, `1440p`, `4k`, `8k`), HD/4K flags, or pixel dimensions (plus TV series on Jellyfin 12), with each video's resolution included in search and browse results.
+- **Group matching episodes by show**: List TV shows once with matching and total episode counts when filtering episodes, making it easy to find shows with 4K, SD, or unplayed episodes.
+- **Live playback and transcoding details**: Active sessions now show whether a stream is direct playing, remuxing, or transcoding, along with output codecs, bitrate, and why Jellyfin is transcoding.
+- **Direct name lookup without ID round trips**: Pass library names, usernames, TV show titles, playlist and collection names, actor/director names, or playback device names directly instead of looking up Jellyfin IDs first.
+- **Read actions on mixed tools in `--read-only` mode**: `--read-only` now keeps read actions available on mixed read/write tools (such as viewing users, plugins, devices, server settings, subtitles, images, playlists, and Live TV) while hiding write actions and write-only tools.
+- **Open WebUI setup guide and context sizing**: The README now covers Streamable HTTP setup, Open WebUI `/mcp?toolsets=...` Workspace Model presets, and per-toolset token counts for tuning local model context windows.
+
+### Changed
+
+- **Smaller MCP context footprint**: Tool consolidation, leaner schemas and instructions, compact JSON responses, tighter default list limits, and explicit empty subtitle/lyric flags on media items cut static context usage from ~14,500 to ~8,450 tokens (~3,600 for `find-media` alone) and avoid extra verification calls on smaller models.
+- **Partial configuration updates**: Updating server settings (including aliases such as `transcoding`), library options, plugin settings, or user preferences now merges only the changed fields instead of replacing the entire section and resetting omitted settings (#29).
+- **Clearer confirmation prompts and upfront validation**: Confirmation prompts show field-by-field `old -> new` setting diffs (with secrets and credentialed URLs masked), item names and file paths, backup contents, schedule times, or affected libraries (#29), and validate item IDs, backups, external subtitles, and merged versions before prompting.
+- **Resolution tiers in codec reports**: Codec reports classify videos from 8K down to SD using both width and height, so cropped widescreen movies (such as 1920x800), 4:3 transfers, and portrait videos land in the right tier.
+
+### Fixed
+
+- **Metadata updates with trickplay**: Updating single or batch item metadata no longer fails with a 500 error on items that have trickplay thumbnails.
+- **Multi-stream video details**: Items with multiple video streams (such as 4K Dolby Vision titles with a 1080p enhancement layer) now report the primary video stream's codec, resolution, and HDR details instead of letting a secondary stream overwrite them.
+- **User library restrictions**: Setting allowed libraries on a user account now turns off all-libraries access automatically so the restriction takes effect right away, and Quick Connect authorization can target a specific user account.
+
+### Security
+
+- **Enforced confirmations on every client and broader `--disable-destructive` coverage**: Clients with MCP form elicitation always show a native confirmation prompt, and clients without form elicitation now require a prior server confirmation warning bound to the exact tool arguments before `confirm=true` is accepted, preventing models from skipping confirmation or swapping masked arguments on follow-up calls. Confirmation gates also cover plugin installs and disables, administrator API key creation, and metadata or image overwrite refreshes, and `--disable-destructive` additionally blocks plugin disables, Quick Connect sign-ins, and metadata or image replacements.
+- **Go 1.27.4**: Release binaries and the Docker image build with Go 1.27.4, fixing standard-library vulnerabilities in `net/http` (GO-2026-6859) and `crypto/x509` (GO-2026-6809).
+
 ## v2026.1015.1
 
 Scans of one library or one changed path, and Go 1.27.2. Thanks to @lz37, whose pull requests #31 and #32 this release builds on.

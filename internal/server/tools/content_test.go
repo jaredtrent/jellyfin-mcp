@@ -13,6 +13,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	jf "github.com/jaredtrent/jellyfin-mcp/internal/jellyfin"
 	"github.com/jaredtrent/jellyfin-mcp/internal/server/tools"
 )
 
@@ -511,7 +512,7 @@ func TestSubtitles_Search_ReportsThreeLetterLanguage(t *testing.T) {
 	if gotEndpoint != "/Items/item-1/RemoteSearch/Subtitles/eng" {
 		t.Errorf("endpoint = %q, want /Items/item-1/RemoteSearch/Subtitles/eng", gotEndpoint)
 	}
-	if !strings.Contains(text, `"language": "eng"`) {
+	if !strings.Contains(text, `"language":"eng"`) {
 		t.Errorf("expected language eng in result, got: %s", text)
 	}
 }
@@ -656,5 +657,165 @@ func subtitleAppearsAfterUpload(posts *[]contentPost) func(context.Context, stri
 			*m = map[string]any{"Id": "item-1", "Name": "Item One", "MediaStreams": streams}
 		}
 		return nil
+	}
+}
+
+func TestContent_ConfirmationPromptsAndSubtitleTrackValidation(t *testing.T) {
+	mc := &mockClient{
+		getFunc: func(_ context.Context, endpoint string, _ url.Values, dest any) error {
+			switch endpoint {
+			case "/Items":
+				return jsonInto(map[string]any{"Items": []map[string]any{
+					{"Id": "v1", "Name": "Test Movie", "MediaStreams": []any{map[string]any{"Type": "Video", "DisplayTitle": "4K HEVC"}}},
+					{"Id": "v2", "Name": "Test Movie", "MediaStreams": []any{map[string]any{"Type": "Video", "Width": float64(1920), "Height": float64(1080)}}},
+				}}, dest)
+			case "/Items/movie-1":
+				return jsonInto(map[string]any{
+					"Id":   "movie-1",
+					"Name": "Sample Movie",
+					"MediaStreams": []any{
+						map[string]any{"Index": float64(2), "Type": "Subtitle", "IsExternal": false, "Language": "eng", "Codec": "subrip"},
+						map[string]any{"Index": float64(3), "Type": "Subtitle", "IsExternal": true, "Language": "eng", "Codec": "srt"},
+					},
+				}, dest)
+			}
+			return nil
+		},
+	}
+
+	mergeRes := callTool(t, mc, "", "jellyfin_metadata", map[string]any{
+		"action":   "merge_versions",
+		"item_ids": []any{"v1", "v2"},
+	})
+	mergeText := resultText(t, mergeRes)
+	for _, want := range []string{"'Test Movie [4K HEVC]'", "'Test Movie [1920x1080]'", "highest-resolution version as primary"} {
+		if !strings.Contains(mergeText, want) {
+			t.Errorf("merge_versions prompt missing %q: %s", want, mergeText)
+		}
+	}
+
+	metaRes := callTool(t, mc, "", "jellyfin_metadata", map[string]any{
+		"action":  "update",
+		"item_id": "movie-1",
+		"genres":  []any{"Sci-Fi", "Drama"},
+		"tags":    []any{"4k"},
+	})
+	metaText := resultText(t, metaRes)
+	for _, want := range []string{"Update metadata of 'Sample Movie'?", `genres=["Sci-Fi", "Drama"]`, `tags=["4k"]`, "Replacing genres, tags overwrites existing values in those lists."} {
+		if !strings.Contains(metaText, want) {
+			t.Errorf("metadata update prompt missing %q: %s", want, metaText)
+		}
+	}
+
+	batchMeta := callTool(t, mc, "", "jellyfin_metadata", map[string]any{
+		"action":   "batch_update",
+		"item_ids": []any{"v1", "v2"},
+		"tags":     []any{"classic"},
+		"dry_run":  false,
+	})
+	if text := resultText(t, batchMeta); !strings.Contains(text, "Update metadata of 2 items") || !strings.Contains(text, "'Test Movie'") {
+		t.Errorf("batch_update prompt = %s", text)
+	}
+
+	embeddedSub := callTool(t, mc, "", "jellyfin_subtitles_lyrics", map[string]any{
+		"action": "delete_subtitle", "item_id": "movie-1", "subtitle_index": 2,
+	})
+	if !embeddedSub.IsError || !strings.Contains(resultText(t, embeddedSub), "embedded inside the media file and cannot be deleted") {
+		t.Errorf("expected embedded track refusal, got: %s", resultText(t, embeddedSub))
+	}
+
+	missingSub := callTool(t, mc, "", "jellyfin_subtitles_lyrics", map[string]any{
+		"action": "delete_subtitle", "item_id": "movie-1", "subtitle_index": 9,
+	})
+	if !missingSub.IsError || !strings.Contains(resultText(t, missingSub), "has no subtitle track at index 9") {
+		t.Errorf("expected missing track refusal, got: %s", resultText(t, missingSub))
+	}
+
+	extSub := callTool(t, mc, "", "jellyfin_subtitles_lyrics", map[string]any{
+		"action": "delete_subtitle", "item_id": "movie-1", "subtitle_index": 3,
+	})
+	if text := resultText(t, extSub); !strings.Contains(text, "Delete external subtitle track 3 (eng, srt) from 'Sample Movie'?") {
+		t.Errorf("external track prompt = %s", text)
+	}
+
+	batchSubs := callTool(t, mc, "", "jellyfin_subtitles_lyrics", map[string]any{
+		"action": "batch_download_subtitles", "item_ids": []any{"v1", "v2"}, "language": "spa",
+	})
+	if text := resultText(t, batchSubs); !strings.Contains(text, "Search for and download 'spa' subtitles for 2 items ('Test Movie', 'Test Movie')?") {
+		t.Errorf("batch_download_subtitles prompt = %s", text)
+	}
+}
+
+func TestVideos_SplitVersions_PreGateChecks(t *testing.T) {
+	var deleted []string
+	mc := &mockClient{
+		getFunc: func(_ context.Context, endpoint string, _ url.Values, dest any) error {
+			switch endpoint {
+			case "/Items/folder-grouped":
+				return jsonInto(map[string]any{
+					"Id":               "folder-grouped",
+					"Name":             "Sample Movie",
+					"MediaSourceCount": float64(2),
+					"MediaSources": []any{
+						map[string]any{"Id": "s1", "Type": "Default"},
+						map[string]any{"Id": "s2", "Type": "Default"},
+					},
+				}, dest)
+			case "/Items/single-version":
+				return jsonInto(map[string]any{
+					"Id":               "single-version",
+					"Name":             "Single Movie",
+					"MediaSourceCount": float64(1),
+					"MediaSources": []any{
+						map[string]any{"Id": "s3", "Type": "Default"},
+					},
+				}, dest)
+			case "/Items/merged-item":
+				return jsonInto(map[string]any{
+					"Id":               "merged-item",
+					"Name":             "Test Movie",
+					"MediaSourceCount": float64(2),
+					"MediaSources": []any{
+						map[string]any{"Id": "v1", "Type": "Default"},
+						map[string]any{"Id": "v2", "Type": "Grouping"},
+					},
+				}, dest)
+			case "/Items/missing-item":
+				return &jf.APIError{StatusCode: 404}
+			}
+			return nil
+		},
+		delFunc: func(_ context.Context, endpoint string, _ url.Values) error {
+			deleted = append(deleted, endpoint)
+			return nil
+		},
+	}
+
+	folderRes := callTool(t, mc, "", "jellyfin_metadata", map[string]any{"action": "split_versions", "item_id": "folder-grouped"})
+	if !folderRes.IsError || !strings.Contains(resultText(t, folderRes), "folder-grouped versions in the same directory") {
+		t.Errorf("expected folder-grouped refusal before gating, got: %s", resultText(t, folderRes))
+	}
+
+	singleRes := callTool(t, mc, "", "jellyfin_metadata", map[string]any{"action": "split_versions", "item_id": "single-version"})
+	if !singleRes.IsError || !strings.Contains(resultText(t, singleRes), "has no merged alternate versions to split") {
+		t.Errorf("expected single-version refusal before gating, got: %s", resultText(t, singleRes))
+	}
+
+	missingRes := callTool(t, mc, "", "jellyfin_metadata", map[string]any{"action": "split_versions", "item_id": "missing-item"})
+	if !missingRes.IsError || !strings.Contains(resultText(t, missingRes), "was not found") {
+		t.Errorf("expected 404 refusal before gating, got: %s", resultText(t, missingRes))
+	}
+
+	promptRes := callTool(t, mc, "", "jellyfin_metadata", map[string]any{"action": "split_versions", "item_id": "merged-item"})
+	if promptRes.IsError || !strings.Contains(resultText(t, promptRes), "Split the alternate versions of 'Test Movie' back into separate items?") {
+		t.Errorf("merged item prompt = %s", resultText(t, promptRes))
+	}
+	if len(deleted) != 0 {
+		t.Fatalf("deleted before confirmation: %v", deleted)
+	}
+
+	applyRes := callTool(t, mc, "", "jellyfin_metadata", map[string]any{"action": "split_versions", "item_id": "merged-item", "confirm": true})
+	if applyRes.IsError || len(deleted) != 1 || deleted[0] != "/Videos/merged-item/AlternateSources" {
+		t.Errorf("confirmed split = %s, deleted = %v", resultText(t, applyRes), deleted)
 	}
 }
